@@ -47,10 +47,17 @@ func (r *Repository) GetRecentTrades(limit int) ([]Trade, error) {
 }
 
 func (r *Repository) GetTodayPnL() (float64, error) {
-	today := time.Now().Truncate(24 * time.Hour)
+	// Use MSK timezone for "today" boundary
+	msk, err := time.LoadLocation("Europe/Moscow")
+	if err != nil {
+		msk = time.FixedZone("MSK", 3*60*60)
+	}
+	now := time.Now().In(msk)
+	todayMSK := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, msk)
+
 	var total float64
-	err := r.db.Model(&Trade{}).
-		Where("status = ? AND updated_at >= ?", "closed", today).
+	err = r.db.Model(&Trade{}).
+		Where("status = ? AND action = ? AND updated_at >= ?", "closed", "SELL", todayMSK).
 		Select("COALESCE(SUM(pnl), 0)").Scan(&total).Error
 	return total, err
 }
@@ -58,7 +65,7 @@ func (r *Repository) GetTodayPnL() (float64, error) {
 func (r *Repository) GetTotalPnL() (float64, error) {
 	var total float64
 	err := r.db.Model(&Trade{}).
-		Where("status = ?", "closed").
+		Where("status = ? AND action = ?", "closed", "SELL").
 		Select("COALESCE(SUM(pnl), 0)").Scan(&total).Error
 	return total, err
 }

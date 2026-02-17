@@ -30,5 +30,12 @@ func NewDatabase(dbPath string) (*gorm.DB, error) {
 		return nil, fmt.Errorf("auto migrate: %w", err)
 	}
 
+	// Migrate data from old pn_l column (GORM default for PnL) to explicit pnl column
+	var hasPnL int
+	sqlDB.QueryRow("SELECT COUNT(*) FROM pragma_table_info('trades') WHERE name = 'pn_l'").Scan(&hasPnL)
+	if hasPnL > 0 {
+		sqlDB.Exec("UPDATE trades SET pnl = pn_l WHERE pn_l != 0 AND (pnl IS NULL OR pnl = 0)")
+	}
+
 	return db, nil
 }
