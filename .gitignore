@@ -1,0 +1,42 @@
+# Config with secrets
+config.yaml
+
+# Database
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+data/
+
+# Binaries
+rus-trader
+bot
+/cmd/bot/bot
+!cmd/bot
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db
+
+CLAUDE.md
+task.txt

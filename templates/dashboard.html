@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rus-Trader Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Rus-Trader</h1>
+            <span class="mode {{if eq .Mode "SANDBOX"}}sandbox{{else}}live{{end}}">{{.Mode}}</span>
+        </header>
+
+        <div class="stats">
+            <div class="stat-card">
+                <div class="stat-label">Портфель</div>
+                <div class="stat-value">{{printf "%.2f" .TotalRub}} &#8381;</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Доступно</div>
+                <div class="stat-value">{{printf "%.2f" .AvailableRub}} &#8381;</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">P&amp;L (день)</div>
+                <div class="stat-value {{if gt .DailyPnL 0.0}}positive{{else if lt .DailyPnL 0.0}}negative{{end}}">
+                    {{printf "%+.2f" .DailyPnL}} &#8381;
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">P&amp;L (всего)</div>
+                <div class="stat-value {{if gt .TotalPnL 0.0}}positive{{else if lt .TotalPnL 0.0}}negative{{end}}">
+                    {{printf "%+.2f" .TotalPnL}} &#8381;
+                </div>
+            </div>
+        </div>
+
+        {{if .OpenPositions}}
+        <section>
+            <h2>Открытые позиции ({{len .OpenPositions}})</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Тикер</th>
+                        <th>Цена входа</th>
+                        <th>Текущая цена</th>
+                        <th>Кол-во</th>
+                        <th>SL</th>
+                        <th>TP</th>
+                        <th>P&amp;L</th>
+                        <th>Дата</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{range .OpenPositions}}
+                    <tr>
+                        <td><strong>{{.Ticker}}</strong></td>
+                        <td>{{printf "%.2f" .Price}}</td>
+                        <td>{{if gt .CurrentPrice 0.0}}{{printf "%.2f" .CurrentPrice}}{{else}}&mdash;{{end}}</td>
+                        <td>{{.Quantity}}</td>
+                        <td>{{printf "%.2f" .StopLossPrice}}</td>
+                        <td>{{printf "%.2f" .TakeProfitPrice}}</td>
+                        <td class="{{if gt .PnL 0.0}}positive{{else if lt .PnL 0.0}}negative{{end}}">
+                            {{if gt .CurrentPrice 0.0}}{{printf "%+.2f" .PnL}} ({{printf "%+.1f" .PnLPercent}}%){{else}}&mdash;{{end}}
+                        </td>
+                        <td>{{.CreatedAt.Format "02.01 15:04"}}</td>
+                    </tr>
+                    {{end}}
+                </tbody>
+            </table>
+        </section>
+        {{end}}
+
+        <section>
+            <h2>Последние сделки</h2>
+            {{if .RecentTrades}}
+            <table>
+                <thead>
+                    <tr>
+                        <th>Дата</th>
+                        <th>Действие</th>
+                        <th>Тикер</th>
+                        <th>Цена</th>
+                        <th>Кол-во</th>
+                        <th>P&amp;L</th>
+                        <th>Статус</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{range .RecentTrades}}
+                    <tr>
+                        <td>{{.CreatedAt.Format "02.01 15:04"}}</td>
+                        <td class="{{if eq .Action "BUY"}}buy{{else}}sell{{end}}">{{.Action}}</td>
+                        <td><strong>{{.Ticker}}</strong></td>
+                        <td>{{printf "%.2f" .Price}}</td>
+                        <td>{{.Quantity}}</td>
+                        <td class="{{if gt .PnL 0.0}}positive{{else if lt .PnL 0.0}}negative{{end}}">
+                            {{if ne .PnL 0.0}}{{printf "%+.2f" .PnL}}{{else}}&mdash;{{end}}
+                        </td>
+                        <td>{{.Status}}</td>
+                    </tr>
+                    {{end}}
+                </tbody>
+            </table>
+            {{else}}
+            <p class="empty">Сделок пока нет</p>
+            {{end}}
+        </section>
+    </div>
+</body>
+</html>
