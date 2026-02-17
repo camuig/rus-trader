@@ -70,6 +70,14 @@ func (r *Repository) GetTotalPnL() (float64, error) {
 	return total, err
 }
 
+func (r *Repository) GetClosedTradesLast24h() ([]Trade, error) {
+	cutoff := time.Now().Add(-24 * time.Hour)
+	var trades []Trade
+	err := r.db.Where("status = ? AND action = ? AND created_at >= ?", "closed", "SELL", cutoff).
+		Order("created_at DESC").Find(&trades).Error
+	return trades, err
+}
+
 // Analysis Logs
 
 func (r *Repository) SaveAnalysisLog(log *AnalysisLog) error {

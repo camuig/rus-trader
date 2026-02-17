@@ -211,10 +211,30 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 		tickerAnalyses = append(tickerAnalyses, ta)
 	}
 
-	// 8. AI analysis
+	// 8. Fetch recent closed trades for AI context
+	var recentTrades []ai.RecentClosedTrade
+	if closedTrades, err := s.repo.GetClosedTradesLast24h(); err == nil {
+		for _, t := range closedTrades {
+			entryPrice := t.Price // exit price from SELL record
+			if t.Quantity > 0 {
+				entryPrice = t.Price - t.PnL/float64(t.Quantity)
+			}
+			recentTrades = append(recentTrades, ai.RecentClosedTrade{
+				Ticker:     t.Ticker,
+				EntryPrice: entryPrice,
+				ExitPrice:  t.Price,
+				Quantity:   t.Quantity,
+				PnL:        t.PnL,
+				ClosedAt:   t.CreatedAt,
+			})
+		}
+	}
+
+	// 9. AI analysis
 	analysisReq := &ai.AnalysisRequest{
 		Tickers:      tickerAnalyses,
 		Positions:    portfolio.Positions,
+		RecentTrades: recentTrades,
 		AvailableRub: portfolio.AvailableRub,
 		TotalRub:     portfolio.TotalRub,
 	}
@@ -234,10 +254,10 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 			"take_profit", d.TakeProfit, "reasoning", d.Reasoning)
 	}
 
-	// 9. Execute decisions
+	// 10. Execute decisions
 	s.executor.Execute(decisions)
 
-	// 10. Save analysis log and portfolio snapshot
+	// 11. Save analysis log and portfolio snapshot
 	s.saveAnalysisLog(len(tradableTickers), rawResponse, executor.DecisionsToJSON(decisions), nil)
 	s.savePortfolioSnapshot(portfolio)
 

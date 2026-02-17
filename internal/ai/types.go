@@ -1,6 +1,10 @@
 package ai
 
-import "github.com/camuig/rus-trader/internal/broker"
+import (
+	"time"
+
+	"github.com/camuig/rus-trader/internal/broker"
+)
 
 type TickerAnalysis struct {
 	Ticker     string
@@ -17,9 +21,19 @@ type TickerAnalysis struct {
 	News       []string // заголовки новостей
 }
 
+type RecentClosedTrade struct {
+	Ticker     string
+	EntryPrice float64
+	ExitPrice  float64
+	Quantity   int64
+	PnL        float64
+	ClosedAt   time.Time
+}
+
 type AnalysisRequest struct {
 	Tickers      []TickerAnalysis
 	Positions    []broker.PositionInfo
+	RecentTrades []RecentClosedTrade
 	AvailableRub float64
 	TotalRub     float64
 }
