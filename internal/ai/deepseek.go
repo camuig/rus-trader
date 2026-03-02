@@ -2,7 +2,10 @@ package ai
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"strings"
 
 	openai "github.com/sashabaranov/go-openai"
 
@@ -29,17 +32,17 @@ func NewDeepSeekClient(cfg *config.Config, log *logger.Logger) *DeepSeekClient {
 	}
 }
 
-func (d *DeepSeekClient) Analyze(ctx context.Context, req *AnalysisRequest) ([]AIDecision, string, error) {
+func (d *DeepSeekClient) Analyze(ctx context.Context, req *AnalysisRequest, todayTraded []string) ([]AIDecision, string, error) {
 	ctx, cancel := context.WithTimeout(ctx, d.cfg.DeepSeekTimeout())
 	defer cancel()
 
-	userPrompt := BuildUserPrompt(req)
+	userPrompt := BuildUserPrompt(req, todayTraded)
 
 	d.logger.Info("sending analysis request to DeepSeek",
 		"tickers", len(req.Tickers),
 		"positions", len(req.Positions))
 
-	resp, err := d.client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
+	stream, err := d.client.CreateChatCompletionStream(ctx, openai.ChatCompletionRequest{
 		Model: d.model,
 		Messages: []openai.ChatCompletionMessage{
 			{Role: openai.ChatMessageRoleSystem, Content: systemPrompt},
@@ -49,12 +52,23 @@ func (d *DeepSeekClient) Analyze(ctx context.Context, req *AnalysisRequest) ([]A
 	if err != nil {
 		return nil, "", fmt.Errorf("deepseek API call: %w", err)
 	}
+	defer stream.Close()
 
-	if len(resp.Choices) == 0 {
-		return nil, "", fmt.Errorf("deepseek returned no choices")
+	var content strings.Builder
+	for {
+		chunk, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, content.String(), fmt.Errorf("deepseek stream: %w", err)
+		}
+		if len(chunk.Choices) > 0 {
+			content.WriteString(chunk.Choices[0].Delta.Content)
+		}
 	}
 
-	rawResponse := resp.Choices[0].Message.Content
+	rawResponse := content.String()
 	d.logger.Info("received AI response", "length", len(rawResponse))
 	d.logger.Debug("AI raw response", "content", rawResponse)
 

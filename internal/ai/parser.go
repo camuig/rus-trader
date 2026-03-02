@@ -7,23 +7,29 @@ import (
 	"strings"
 )
 
-var thinkTagRegex = regexp.MustCompile(`(?s)<think>.*?</think>`)
+var (
+	thinkTagRegex = regexp.MustCompile(`(?s)<think>.*?</think>`)
+	codeFenceRegex = regexp.MustCompile("(?si)```\\w*\\s*\n(.*?)\n\\s*```")
+)
 
 // StripThinkTags removes DeepSeek R1 reasoning tags from the response.
 func StripThinkTags(text string) string {
 	return strings.TrimSpace(thinkTagRegex.ReplaceAllString(text, ""))
 }
 
+// stripCodeFences extracts content from markdown code fences if present.
+func stripCodeFences(text string) string {
+	if match := codeFenceRegex.FindStringSubmatch(text); len(match) > 1 {
+		return strings.TrimSpace(match[1])
+	}
+	return strings.TrimSpace(text)
+}
+
 // ParseDecisions parses AI response into a slice of decisions.
 // Handles: JSON array, single JSON object, markdown code fences.
 func ParseDecisions(text string) ([]AIDecision, error) {
 	cleaned := StripThinkTags(text)
-
-	// Remove markdown code fences
-	cleaned = strings.TrimPrefix(cleaned, "```json")
-	cleaned = strings.TrimPrefix(cleaned, "```")
-	cleaned = strings.TrimSuffix(cleaned, "```")
-	cleaned = strings.TrimSpace(cleaned)
+	cleaned = stripCodeFences(cleaned)
 
 	if cleaned == "" || cleaned == "[]" {
 		return nil, nil

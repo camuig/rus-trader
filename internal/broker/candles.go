@@ -7,15 +7,22 @@ import (
 	pb "github.com/russianinvestments/invest-api-go-sdk/proto"
 )
 
+type PeriodOHLCV struct {
+	Open   float64
+	High   float64
+	Low    float64
+	Close  float64
+	Volume float64
+}
+
 type CandleSnapshot struct {
 	Ticker        string
 	InstrumentUID string
 	LastPrice     float64
-	Price3hAgo    float64
-	Price1dAgo    float64
-	Price3dAgo    float64
-	Price1wAgo    float64
-	Volume24h     float64
+	Period3h      PeriodOHLCV
+	Period1d      PeriodOHLCV
+	Period3d      PeriodOHLCV
+	Period1w      PeriodOHLCV
 }
 
 func (bc *BrokerClient) FetchCandleSnapshots(tickers []string, concurrency int) []CandleSnapshot {
@@ -84,14 +91,51 @@ func (bc *BrokerClient) fetchOneTicker(ticker string) (*CandleSnapshot, error) {
 		Ticker:        ticker,
 		InstrumentUID: uid,
 		LastPrice:     findCloseAtOffset(candles, now, 0),
-		Price3hAgo:    findCloseAtOffset(candles, now, 3*time.Hour),
-		Price1dAgo:    findCloseAtOffset(candles, now, 24*time.Hour),
-		Price3dAgo:    findCloseAtOffset(candles, now, 3*24*time.Hour),
-		Price1wAgo:    findCloseAtOffset(candles, now, 7*24*time.Hour),
-		Volume24h:     sumVolume24h(candles, now),
+		Period3h:      aggregateOHLCV(candles, now, 3*time.Hour),
+		Period1d:      aggregateOHLCV(candles, now, 24*time.Hour),
+		Period3d:      aggregateOHLCV(candles, now, 3*24*time.Hour),
+		Period1w:      aggregateOHLCV(candles, now, 7*24*time.Hour),
 	}
 
 	return snap, nil
+}
+
+// aggregateOHLCV aggregates hourly candles for the given period into OHLCV.
+// Open = first candle's open, High = max high, Low = min low, Close = last candle's close, Volume = sum.
+func aggregateOHLCV(candles []*pb.HistoricCandle, now time.Time, period time.Duration) PeriodOHLCV {
+	cutoff := now.Add(-period)
+
+	var filtered []*pb.HistoricCandle
+	for _, c := range candles {
+		if c.GetTime().AsTime().After(cutoff) || c.GetTime().AsTime().Equal(cutoff) {
+			filtered = append(filtered, c)
+		}
+	}
+
+	if len(filtered) == 0 {
+		return PeriodOHLCV{}
+	}
+
+	result := PeriodOHLCV{
+		Open:  filtered[0].GetOpen().ToFloat(),
+		High:  filtered[0].GetHigh().ToFloat(),
+		Low:   filtered[0].GetLow().ToFloat(),
+		Close: filtered[len(filtered)-1].GetClose().ToFloat(),
+	}
+
+	for _, c := range filtered {
+		h := c.GetHigh().ToFloat()
+		l := c.GetLow().ToFloat()
+		if h > result.High {
+			result.High = h
+		}
+		if l < result.Low {
+			result.Low = l
+		}
+		result.Volume += float64(c.GetVolume())
+	}
+
+	return result
 }
 
 // findCloseAtOffset finds the close price of the candle closest to (now - offset).
@@ -113,17 +157,6 @@ func findCloseAtOffset(candles []*pb.HistoricCandle, now time.Time, offset time.
 		return 0
 	}
 	return bestCandle.GetClose().ToFloat()
-}
-
-func sumVolume24h(candles []*pb.HistoricCandle, now time.Time) float64 {
-	cutoff := now.Add(-24 * time.Hour)
-	var total float64
-	for _, c := range candles {
-		if c.GetTime().AsTime().After(cutoff) {
-			total += float64(c.GetVolume())
-		}
-	}
-	return total
 }
 
 func absDuration(d time.Duration) time.Duration {

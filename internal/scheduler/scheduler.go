@@ -10,6 +10,7 @@ import (
 	"github.com/camuig/rus-trader/internal/broker"
 	"github.com/camuig/rus-trader/internal/config"
 	"github.com/camuig/rus-trader/internal/executor"
+	"github.com/camuig/rus-trader/internal/guard"
 	"github.com/camuig/rus-trader/internal/logger"
 	"github.com/camuig/rus-trader/internal/moex"
 	"github.com/camuig/rus-trader/internal/storage"
@@ -23,6 +24,7 @@ type Scheduler struct {
 	executor *executor.Executor
 	repo     *storage.Repository
 	notifier *telegram.Notifier
+	guard    *guard.TradeGuard
 	config   *config.Config
 	logger   *logger.Logger
 	loc      *time.Location
@@ -35,6 +37,7 @@ func NewScheduler(
 	exec *executor.Executor,
 	repo *storage.Repository,
 	notifier *telegram.Notifier,
+	g *guard.TradeGuard,
 	cfg *config.Config,
 	log *logger.Logger,
 ) *Scheduler {
@@ -45,6 +48,7 @@ func NewScheduler(
 		executor: exec,
 		repo:     repo,
 		notifier: notifier,
+		guard:    g,
 		config:   cfg,
 		logger:   log,
 		loc:      cfg.MOEXLocation(),
@@ -104,7 +108,7 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 	s.logger.Info("starting analysis cycle")
 
 	// 1. Fetch top tickers from MOEX
-	topTickers, err := s.moex.FetchTopTickers(ctx, 50)
+	topTickers, err := s.moex.FetchTopTickers(ctx, 10)
 	if err != nil {
 		s.logger.Error("fetch top tickers", "error", err)
 		s.saveAnalysisLog(0, "", "", err)
@@ -143,7 +147,7 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 			tradableSet[uidToTicker[uid]] = true
 		}
 	}
-	s.logger.Info("tradable tickers from top-50", "count", len(tradableSet))
+	s.logger.Info("tradable tickers", "count", len(tradableSet))
 
 	// 3. Get portfolio early — we need position tickers before fetching candles
 	portfolio, err := s.broker.GetPortfolio()
@@ -185,21 +189,16 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 	}
 	tickerNews := moex.FilterNewsForTickers(allNews, tradableTickers)
 
-	// 7. Build TickerAnalysis with percent changes and news
+	// 7. Build TickerAnalysis with OHLCV data and news
 	tickerAnalyses := make([]ai.TickerAnalysis, 0, len(snapshots))
 	for _, snap := range snapshots {
 		ta := ai.TickerAnalysis{
-			Ticker:     snap.Ticker,
-			LastPrice:  snap.LastPrice,
-			Price3hAgo: snap.Price3hAgo,
-			Price1dAgo: snap.Price1dAgo,
-			Price3dAgo: snap.Price3dAgo,
-			Price1wAgo: snap.Price1wAgo,
-			Volume24h:  snap.Volume24h,
-			Change3h:   pctChange(snap.Price3hAgo, snap.LastPrice),
-			Change1d:   pctChange(snap.Price1dAgo, snap.LastPrice),
-			Change3d:   pctChange(snap.Price3dAgo, snap.LastPrice),
-			Change1w:   pctChange(snap.Price1wAgo, snap.LastPrice),
+			Ticker:    snap.Ticker,
+			LastPrice: snap.LastPrice,
+			Period3h:  toPeriodData(snap.Period3h),
+			Period1d:  toPeriodData(snap.Period1d),
+			Period3d:  toPeriodData(snap.Period3d),
+			Period1w:  toPeriodData(snap.Period1w),
 		}
 
 		if items, ok := tickerNews[snap.Ticker]; ok {
@@ -226,20 +225,38 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 				Quantity:   t.Quantity,
 				PnL:        t.PnL,
 				ClosedAt:   t.CreatedAt,
+				Reasoning:  t.Reasoning,
 			})
 		}
 	}
 
-	// 9. AI analysis
+	// 9. Fetch open trade context for AI (including SL/TP plan)
+	openContext := make(map[string]ai.OpenTradeContext)
+	if openTrades, err := s.repo.GetOpenTrades(); err == nil {
+		for _, t := range openTrades {
+			openContext[t.Ticker] = ai.OpenTradeContext{
+				Reasoning:       t.Reasoning,
+				OpenedAt:        t.CreatedAt,
+				StopLossPrice:   t.StopLossPrice,
+				TakeProfitPrice: t.TakeProfitPrice,
+			}
+		}
+	}
+
+	// 10. Fetch today's traded tickers for anti-churning
+	todayTraded, _ := s.repo.GetTodayTradedTickers()
+
+	// 11. AI analysis
 	analysisReq := &ai.AnalysisRequest{
 		Tickers:      tickerAnalyses,
 		Positions:    portfolio.Positions,
 		RecentTrades: recentTrades,
+		OpenContext:  openContext,
 		AvailableRub: portfolio.AvailableRub,
 		TotalRub:     portfolio.TotalRub,
 	}
 
-	decisions, rawResponse, err := s.ai.Analyze(ctx, analysisReq)
+	decisions, rawResponse, err := s.ai.Analyze(ctx, analysisReq, todayTraded)
 	if err != nil {
 		s.logger.Error("AI analysis", "error", err)
 		s.saveAnalysisLog(len(tradableTickers), rawResponse, "", err)
@@ -248,16 +265,28 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 
 	s.logger.Info("AI decisions received", "count", len(decisions))
 	for _, d := range decisions {
-		s.logger.Debug("AI decision",
+		s.logger.Info("AI decision",
 			"action", d.Action, "ticker", d.Ticker,
-			"confidence", d.Confidence, "stop_loss", d.StopLoss,
-			"take_profit", d.TakeProfit, "reasoning", d.Reasoning)
+			"confidence", d.Confidence, "reasoning", d.Reasoning)
 	}
 
-	// 10. Execute decisions
-	s.executor.Execute(decisions)
+	// 13. Apply TradeGuard filter
+	allowed, blocked := s.guard.Filter(decisions)
+	for _, b := range blocked {
+		s.notifier.NotifyBlocked(b.Decision.Ticker, b.Decision.Action, b.Reason)
+	}
 
-	// 11. Save analysis log and portfolio snapshot
+	allowedDecisions := make([]ai.AIDecision, len(allowed))
+	for i, a := range allowed {
+		allowedDecisions[i] = a.Decision
+	}
+	s.logger.Info("guard filter applied",
+		"allowed", len(allowedDecisions), "blocked", len(blocked))
+
+	// 14. Execute decisions
+	s.executor.Execute(allowedDecisions)
+
+	// 12. Save analysis log and portfolio snapshot
 	s.saveAnalysisLog(len(tradableTickers), rawResponse, executor.DecisionsToJSON(decisions), nil)
 	s.savePortfolioSnapshot(portfolio)
 
@@ -265,11 +294,19 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 	return true
 }
 
-func pctChange(from, to float64) float64 {
-	if from == 0 {
-		return 0
+func toPeriodData(p broker.PeriodOHLCV) ai.PeriodData {
+	var changePct float64
+	if p.Open > 0 {
+		changePct = (p.Close - p.Open) / p.Open * 100
 	}
-	return (to - from) / from * 100
+	return ai.PeriodData{
+		Open:      p.Open,
+		High:      p.High,
+		Low:       p.Low,
+		Close:     p.Close,
+		Volume:    p.Volume,
+		ChangePct: changePct,
+	}
 }
 
 func (s *Scheduler) isWithinTradingHours() bool {

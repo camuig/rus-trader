@@ -12,6 +12,7 @@ import (
 	"github.com/camuig/rus-trader/internal/broker"
 	"github.com/camuig/rus-trader/internal/config"
 	"github.com/camuig/rus-trader/internal/executor"
+	"github.com/camuig/rus-trader/internal/guard"
 	"github.com/camuig/rus-trader/internal/logger"
 	"github.com/camuig/rus-trader/internal/moex"
 	"github.com/camuig/rus-trader/internal/scheduler"
@@ -66,7 +67,8 @@ func main() {
 	notifier := telegram.NewNotifier(cfg, log)
 	exec := executor.NewExecutor(bc, repo, notifier, cfg, log)
 	moexClient := moex.NewClient(log)
-	sched := scheduler.NewScheduler(bc, moexClient, aiClient, exec, repo, notifier, cfg, log)
+	tradeGuard := guard.NewTradeGuard(repo, cfg, log)
+	sched := scheduler.NewScheduler(bc, moexClient, aiClient, exec, repo, notifier, tradeGuard, cfg, log)
 	webServer := web.NewServer(bc, repo, cfg, log)
 
 	// Start scheduler in goroutine

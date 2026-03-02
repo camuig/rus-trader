@@ -142,13 +142,14 @@ func (e *Executor) executeBuy(d ai.AIDecision) {
 		TakeProfitPrice:   tpPrice,
 		StopLossOrderID:   slOrderID,
 		TakeProfitOrderID: tpOrderID,
+		Reasoning:         d.Reasoning,
 		Status:            "open",
 	}
 	if err := e.repo.SaveTrade(trade); err != nil {
 		e.logger.Error("save trade", "error", err)
 	}
 
-	e.notifier.NotifyBuy(d.Ticker, executedPrice, result.ExecutedLots, slPrice, tpPrice)
+	e.notifier.NotifyBuy(d.Ticker, executedPrice, result.ExecutedLots, slPrice, tpPrice, d.Reasoning)
 	e.logger.Info("BUY executed",
 		"ticker", d.Ticker, "price", executedPrice, "lots", result.ExecutedLots,
 		"sl", slPrice, "tp", tpPrice)
@@ -178,8 +179,11 @@ func (e *Executor) executeSell(d ai.AIDecision) {
 	// Cancel stop orders
 	e.broker.CancelStopOrders(openTrade.StopLossOrderID, openTrade.TakeProfitOrderID)
 
-	// Calculate PnL
-	pnl := (result.ExecutedPrice - openTrade.Price) * float64(openTrade.Quantity)
+	// Calculate PnL with commission
+	grossPnl := (result.ExecutedPrice - openTrade.Price) * float64(openTrade.Quantity)
+	commissionPct := e.config.Trading.CommissionPct
+	commission := (openTrade.Price*float64(openTrade.Quantity) + result.ExecutedPrice*float64(openTrade.Quantity)) * commissionPct / 100
+	pnl := grossPnl - commission
 
 	// Update trade in DB
 	openTrade.PnL = pnl
@@ -190,19 +194,20 @@ func (e *Executor) executeSell(d ai.AIDecision) {
 
 	// Save sell trade record
 	sellTrade := &storage.Trade{
-		Ticker:   d.Ticker,
-		Action:   "SELL",
-		Price:    result.ExecutedPrice,
-		Quantity: result.ExecutedLots,
-		OrderID:  result.OrderID,
-		PnL:      pnl,
-		Status:   "closed",
+		Ticker:    d.Ticker,
+		Action:    "SELL",
+		Price:     result.ExecutedPrice,
+		Quantity:  result.ExecutedLots,
+		OrderID:   result.OrderID,
+		PnL:       pnl,
+		Reasoning: d.Reasoning,
+		Status:    "closed",
 	}
 	if err := e.repo.SaveTrade(sellTrade); err != nil {
 		e.logger.Error("save sell trade", "error", err)
 	}
 
-	e.notifier.NotifySell(d.Ticker, result.ExecutedPrice, result.ExecutedLots, pnl)
+	e.notifier.NotifySell(d.Ticker, result.ExecutedPrice, result.ExecutedLots, pnl, d.Reasoning)
 	e.logger.Info("SELL executed",
 		"ticker", d.Ticker, "price", result.ExecutedPrice, "lots", result.ExecutedLots, "pnl", pnl)
 }

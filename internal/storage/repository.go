@@ -78,6 +78,54 @@ func (r *Repository) GetClosedTradesLast24h() ([]Trade, error) {
 	return trades, err
 }
 
+func (r *Repository) GetLastSellTime(ticker string) (time.Time, error) {
+	var trade Trade
+	err := r.db.Where("ticker = ? AND action = ? AND status = ?", ticker, "SELL", "closed").
+		Order("created_at DESC").First(&trade).Error
+	if err != nil {
+		return time.Time{}, err
+	}
+	return trade.CreatedAt, nil
+}
+
+func (r *Repository) CountTodayTrades() (int, error) {
+	msk, err := time.LoadLocation("Europe/Moscow")
+	if err != nil {
+		msk = time.FixedZone("MSK", 3*60*60)
+	}
+	now := time.Now().In(msk)
+	todayMSK := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, msk)
+
+	var count int64
+	err = r.db.Model(&Trade{}).
+		Where("action = ? AND created_at >= ?", "BUY", todayMSK).
+		Count(&count).Error
+	return int(count), err
+}
+
+func (r *Repository) CountOpenPositions() (int, error) {
+	var count int64
+	err := r.db.Model(&Trade{}).
+		Where("status = ? AND action = ?", "open", "BUY").
+		Count(&count).Error
+	return int(count), err
+}
+
+func (r *Repository) GetTodayTradedTickers() ([]string, error) {
+	msk, err := time.LoadLocation("Europe/Moscow")
+	if err != nil {
+		msk = time.FixedZone("MSK", 3*60*60)
+	}
+	now := time.Now().In(msk)
+	todayMSK := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, msk)
+
+	var tickers []string
+	err = r.db.Model(&Trade{}).
+		Where("created_at >= ?", todayMSK).
+		Distinct("ticker").Pluck("ticker", &tickers).Error
+	return tickers, err
+}
+
 // Analysis Logs
 
 func (r *Repository) SaveAnalysisLog(log *AnalysisLog) error {

@@ -18,8 +18,9 @@ type Trade struct {
 	StopLossOrderID string  `json:"stop_loss_order_id"`
 	TakeProfitOrderID string `json:"take_profit_order_id"`
 
-	PnL    float64 `gorm:"column:pnl" json:"pnl"`
-	Status string  `gorm:"not null;default:'open'" json:"status"` // open, closed
+	PnL       float64 `gorm:"column:pnl" json:"pnl"`
+	Reasoning string  `gorm:"type:text" json:"reasoning"`
+	Status    string  `gorm:"not null;default:'open'" json:"status"` // open, closed
 }
 
 type AnalysisLog struct {

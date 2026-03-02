@@ -3,29 +3,22 @@ package ai
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
-const systemPrompt = `Ты — опытный трейдер на российском фондовом рынке (MOEX).
-Анализируй рыночные данные (динамика цен, объёмы, новости) и текущий портфель.
-Принимай решения: BUY (покупка), SELL (закрытие позиции) или HOLD (удержание).
-Горизонт сделок — от нескольких часов до 2 дней.
+const systemPrompt = `Роль: Трейдер MOEX (горизонт 1-2 дня).
+Задача: Анализ OHLCV, объемов и новостей для принятия решений (BUY, SELL, HOLD).
 
-Тебе предоставлены:
-- Топ-50 ликвидных акций TQBR с ценами, процентами изменения за 3ч/1д/3д/1нед и объёмами за 24ч
-- Новости MOEX за последние 24ч, отфильтрованные по тикерам
-- Текущий портфель с открытыми позициями
-- Закрытые сделки за последние 24ч (для контекста — не открывай повторно позицию сразу после закрытия без веской причины)
+Алгоритм анализа:
+1. Управление позициями: HOLD, если цена между SL и TP. SELL только при пробое SL, фундаментальном негативе или отсутствии прогресса > 2 дней. Шум ±0.5% игнорировать.
+2. Открытие (BUY): Только при Confidence ≥65. Цель — прибыль >1.5% (учитывай комиссию 0.08%). Не покупать тикеры, которые уже в портфеле или торговались сегодня.
+3. Технический анализ: Использовать уровни поддержки/сопротивления и всплески объемов на периодах 3ч, 1д, 3д, 1нед.
+4. Риск-менеджмент: Лимит на позицию — 10% депо. Обязательны расчетные SL/TP.
 
-Правила:
-1. Анализируй динамику цен (3ч, 1д, 3д, 1нед), объёмы и новости для каждого тикера.
-2. Не покупай, если позиция по тикеру уже открыта.
-3. Для BUY указывай stop_loss и take_profit (уровни цены).
-4. Для SELL укажи причину закрытия в reasoning.
-5. Confidence от 0 до 100 — чем выше, тем увереннее в решении.
-6. Учитывай риск-менеджмент: не более 10% портфеля на одну позицию.
-7. Ищи тикеры с сильной краткосрочной динамикой, подтверждённой объёмом и/или новостным фоном.
-8. Учитывай открытые позиции — если тренд развернулся, рекомендуй SELL.
-9. Учитывай закрытые сделки за 24ч — избегай повторной покупки тикера сразу после продажи, если нет существенного изменения ситуации.
+Требования к ответу:
+- Строго JSON массив объектов.
+- reasoning: 1 краткое предложение.
+- Если сделок нет — вернуть [].
 
 Ответ строго в JSON (массив объектов):
 [
@@ -34,14 +27,13 @@ const systemPrompt = `Ты — опытный трейдер на российс
     "ticker": "SBER",
     "stop_loss": 250.0,
     "take_profit": 290.0,
-    "confidence": 75,
-    "reasoning": "Причина решения"
+    "confidence": 80,
+    "reasoning": "Краткая причина (1 предложение)"
   }
 ]
+`
 
-Если нет хороших возможностей — верни пустой массив [].`
-
-func BuildUserPrompt(req *AnalysisRequest) string {
+func BuildUserPrompt(req *AnalysisRequest, todayTraded []string) string {
 	var sb strings.Builder
 
 	sb.WriteString("## Текущий портфель\n")
@@ -50,8 +42,27 @@ func BuildUserPrompt(req *AnalysisRequest) string {
 	if len(req.Positions) > 0 {
 		sb.WriteString("### Открытые позиции\n")
 		for _, p := range req.Positions {
-			sb.WriteString(fmt.Sprintf("- %s: %.0f шт, ср.цена %.2f, текущая %.2f, P&L %.2f\n",
-				p.Ticker, p.Quantity, p.AvgPrice, p.CurrentPrice, p.PnL))
+			changeSinceEntry := 0.0
+			if p.AvgPrice > 0 {
+				changeSinceEntry = (p.CurrentPrice - p.AvgPrice) / p.AvgPrice * 100
+			}
+			sb.WriteString(fmt.Sprintf("- %s: %.0f шт, вход %.2f, текущая %.2f (%+.2f%%), P&L %.2f",
+				p.Ticker, p.Quantity, p.AvgPrice, p.CurrentPrice, changeSinceEntry, p.PnL))
+			if tc, ok := req.OpenContext[p.Ticker]; ok {
+				sb.WriteString(fmt.Sprintf("\n  Открыта: %s (удержание %s)",
+					tc.OpenedAt.Format("02.01 15:04"), formatDuration(tc.OpenedAt)))
+				if tc.StopLossPrice > 0 || tc.TakeProfitPrice > 0 {
+					sb.WriteString(fmt.Sprintf("\n  План: SL=%.2f, TP=%.2f", tc.StopLossPrice, tc.TakeProfitPrice))
+					if tc.TakeProfitPrice > 0 && p.AvgPrice > 0 {
+						progress := (p.CurrentPrice - p.AvgPrice) / (tc.TakeProfitPrice - p.AvgPrice) * 100
+						sb.WriteString(fmt.Sprintf(" (прогресс к TP: %.0f%%)", progress))
+					}
+				}
+				if tc.Reasoning != "" {
+					sb.WriteString(fmt.Sprintf("\n  Гипотеза: %s", truncate(tc.Reasoning, 150)))
+				}
+			}
+			sb.WriteString("\n")
 		}
 		sb.WriteString("\n")
 	} else {
@@ -60,22 +71,40 @@ func BuildUserPrompt(req *AnalysisRequest) string {
 
 	if len(req.RecentTrades) > 0 {
 		sb.WriteString("### Закрытые сделки за 24ч\n")
-		sb.WriteString("| Тикер | Вход | Выход | Кол-во | P&L | Время закрытия |\n")
-		sb.WriteString("|-------|------|-------|--------|-----|----------------|\n")
 		for _, t := range req.RecentTrades {
-			sb.WriteString(fmt.Sprintf("| %s | %.2f | %.2f | %d | %+.2f | %s |\n",
+			sb.WriteString(fmt.Sprintf("- %s: вход %.2f → выход %.2f, %d шт, P&L %+.2f, закрыта %s",
 				t.Ticker, t.EntryPrice, t.ExitPrice, t.Quantity, t.PnL,
 				t.ClosedAt.Format("02.01 15:04")))
+			if t.Reasoning != "" {
+				sb.WriteString(fmt.Sprintf("\n  Причина закрытия: %s", truncate(t.Reasoning, 150)))
+			}
+			sb.WriteString("\n")
 		}
 		sb.WriteString("\n")
 	}
 
-	sb.WriteString("## Рыночные данные (топ-50 по объёму, TQBR)\n")
-	sb.WriteString("| Тикер | Цена | 3ч% | 1д% | 3д% | 1нед% | Объём24ч |\n")
-	sb.WriteString("|-------|------|-----|-----|-----|-------|----------|\n")
+	if len(todayTraded) > 0 {
+		sb.WriteString("### Тикеры, проторгованные сегодня (НЕ покупать повторно!)\n")
+		sb.WriteString(strings.Join(todayTraded, ", "))
+		sb.WriteString("\n\n")
+	}
+
+	sb.WriteString("## Рыночные данные OHLCV (TQBR)\n")
 	for _, t := range req.Tickers {
-		sb.WriteString(fmt.Sprintf("| %s | %.2f | %+.1f | %+.1f | %+.1f | %+.1f | %.0f |\n",
-			t.Ticker, t.LastPrice, t.Change3h, t.Change1d, t.Change3d, t.Change1w, t.Volume24h))
+		sb.WriteString(fmt.Sprintf("%s (%.2f):\n", t.Ticker, t.LastPrice))
+		periods := []struct {
+			name string
+			data PeriodData
+		}{
+			{"3ч  ", t.Period3h},
+			{"1д  ", t.Period1d},
+			{"3д  ", t.Period3d},
+			{"1нед", t.Period1w},
+		}
+		for _, p := range periods {
+			sb.WriteString(fmt.Sprintf("  %s: O=%.2f H=%.2f L=%.2f V=%s %+.1f%%\n",
+				p.name, p.data.Open, p.data.High, p.data.Low, formatVolume(p.data.Volume), p.data.ChangePct))
+		}
 	}
 	sb.WriteString("\n")
 
@@ -100,4 +129,33 @@ func BuildUserPrompt(req *AnalysisRequest) string {
 	sb.WriteString("\nПроанализируй и выдай решения в JSON.")
 
 	return sb.String()
+}
+
+func formatVolume(v float64) string {
+	switch {
+	case v >= 1_000_000:
+		return fmt.Sprintf("%.1fM", v/1_000_000)
+	case v >= 1_000:
+		return fmt.Sprintf("%.1fK", v/1_000)
+	default:
+		return fmt.Sprintf("%.0f", v)
+	}
+}
+
+func formatDuration(since time.Time) string {
+	d := time.Since(since)
+	hours := int(d.Hours())
+	minutes := int(d.Minutes()) % 60
+	if hours > 0 {
+		return fmt.Sprintf("%dч %dмин", hours, minutes)
+	}
+	return fmt.Sprintf("%dмин", minutes)
+}
+
+func truncate(s string, maxRunes int) string {
+	r := []rune(s)
+	if len(r) <= maxRunes {
+		return s
+	}
+	return string(r[:maxRunes]) + "…"
 }

@@ -18,6 +18,7 @@ type OpenPosition struct {
 	CurrentPrice    float64
 	PnL             float64
 	PnLPercent      float64
+	Reasoning       string
 }
 
 type DashboardData struct {
@@ -116,6 +117,7 @@ func (s *Server) enrichPositions(trades []storage.Trade) []OpenPosition {
 			StopLossPrice:   t.StopLossPrice,
 			TakeProfitPrice: t.TakeProfitPrice,
 			CreatedAt:       t.CreatedAt,
+			Reasoning:       t.Reasoning,
 		}
 		if live, ok := liveMap[t.Ticker]; ok {
 			op.CurrentPrice = live.CurrentPrice

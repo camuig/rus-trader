@@ -6,19 +6,23 @@ import (
 	"github.com/camuig/rus-trader/internal/broker"
 )
 
+type PeriodData struct {
+	Open      float64
+	High      float64
+	Low       float64
+	Close     float64
+	Volume    float64
+	ChangePct float64
+}
+
 type TickerAnalysis struct {
-	Ticker     string
-	LastPrice  float64
-	Price3hAgo float64
-	Price1dAgo float64
-	Price3dAgo float64
-	Price1wAgo float64
-	Volume24h  float64
-	Change3h   float64 // процент
-	Change1d   float64
-	Change3d   float64
-	Change1w   float64
-	News       []string // заголовки новостей
+	Ticker    string
+	LastPrice float64
+	Period3h  PeriodData
+	Period1d  PeriodData
+	Period3d  PeriodData
+	Period1w  PeriodData
+	News      []string // заголовки новостей
 }
 
 type RecentClosedTrade struct {
@@ -28,12 +32,21 @@ type RecentClosedTrade struct {
 	Quantity   int64
 	PnL        float64
 	ClosedAt   time.Time
+	Reasoning  string // причина закрытия
+}
+
+type OpenTradeContext struct {
+	Reasoning       string
+	OpenedAt        time.Time
+	StopLossPrice   float64
+	TakeProfitPrice float64
 }
 
 type AnalysisRequest struct {
 	Tickers      []TickerAnalysis
 	Positions    []broker.PositionInfo
 	RecentTrades []RecentClosedTrade
+	OpenContext  map[string]OpenTradeContext // ticker → контекст открытой позиции
 	AvailableRub float64
 	TotalRub     float64
 }

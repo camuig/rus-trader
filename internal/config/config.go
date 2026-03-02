@@ -36,6 +36,11 @@ type TradingConfig struct {
 	DefaultStopLossPct   float64 `yaml:"default_stop_loss_pct"`
 	DefaultTakeProfitPct float64 `yaml:"default_take_profit_pct"`
 	CandleConcurrency    int     `yaml:"candle_concurrency"`
+	CooldownMinutes      int     `yaml:"cooldown_minutes"`
+	MinHoldMinutes       int     `yaml:"min_hold_minutes"`
+	MaxOpenPositions     int     `yaml:"max_open_positions"`
+	MaxDailyTrades       int     `yaml:"max_daily_trades"`
+	CommissionPct        float64 `yaml:"commission_pct"`
 }
 
 type TelegramConfig struct {
@@ -77,7 +82,7 @@ func setDefaults(cfg *Config) {
 		cfg.DeepSeek.Model = "deepseek-reasoner"
 	}
 	if cfg.DeepSeek.TimeoutSeconds == 0 {
-		cfg.DeepSeek.TimeoutSeconds = 120
+		cfg.DeepSeek.TimeoutSeconds = 180
 	}
 	if cfg.Trading.Interval == "" {
 		cfg.Trading.Interval = "15m"
@@ -86,7 +91,7 @@ func setDefaults(cfg *Config) {
 		cfg.Trading.MaxPositionRub = 10000
 	}
 	if cfg.Trading.MinConfidence == 0 {
-		cfg.Trading.MinConfidence = 70
+		cfg.Trading.MinConfidence = 75
 	}
 	if cfg.Trading.DefaultStopLossPct == 0 {
 		cfg.Trading.DefaultStopLossPct = 3.0
@@ -96,6 +101,21 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.Trading.CandleConcurrency == 0 {
 		cfg.Trading.CandleConcurrency = 10
+	}
+	if cfg.Trading.CooldownMinutes == 0 {
+		cfg.Trading.CooldownMinutes = 120
+	}
+	if cfg.Trading.MinHoldMinutes == 0 {
+		cfg.Trading.MinHoldMinutes = 60
+	}
+	if cfg.Trading.MaxOpenPositions == 0 {
+		cfg.Trading.MaxOpenPositions = 5
+	}
+	if cfg.Trading.MaxDailyTrades == 0 {
+		cfg.Trading.MaxDailyTrades = 8
+	}
+	if cfg.Trading.CommissionPct == 0 {
+		cfg.Trading.CommissionPct = 0.025
 	}
 	if cfg.Web.Port == 0 {
 		cfg.Web.Port = 8080
