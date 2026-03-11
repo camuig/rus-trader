@@ -17,6 +17,7 @@ type PeriodData struct {
 
 type TickerAnalysis struct {
 	Ticker    string
+	Brief     string // краткая карточка тикера (имя/тип/лот/валюта/страна)
 	LastPrice float64
 	Period3h  PeriodData
 	Period1d  PeriodData
@@ -44,6 +45,7 @@ type OpenTradeContext struct {
 
 type AnalysisRequest struct {
 	Tickers      []TickerAnalysis
+	GlobalNews   []string
 	Positions    []broker.PositionInfo
 	RecentTrades []RecentClosedTrade
 	OpenContext  map[string]OpenTradeContext // ticker → контекст открытой позиции
@@ -51,8 +53,16 @@ type AnalysisRequest struct {
 	TotalRub     float64
 }
 
+type PromptLimits struct {
+	MaxChars            int
+	MaxTickerBriefChars int
+	MaxTickerNewsItems  int
+	MaxWorldNewsItems   int
+	MaxNewsTitleChars   int
+}
+
 type AIDecision struct {
-	Action     string  `json:"action"`     // BUY, SELL, HOLD
+	Action     string  `json:"action"` // BUY, SELL, HOLD
 	Ticker     string  `json:"ticker"`
 	StopLoss   float64 `json:"stop_loss"`
 	TakeProfit float64 `json:"take_profit"`

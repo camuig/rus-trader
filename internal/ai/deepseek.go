@@ -36,11 +36,19 @@ func (d *DeepSeekClient) Analyze(ctx context.Context, req *AnalysisRequest, toda
 	ctx, cancel := context.WithTimeout(ctx, d.cfg.DeepSeekTimeout())
 	defer cancel()
 
-	userPrompt := BuildUserPrompt(req, todayTraded)
+	limits := PromptLimits{
+		MaxChars:            d.cfg.DeepSeek.PromptMaxChars,
+		MaxTickerBriefChars: d.cfg.DeepSeek.MaxTickerBriefChars,
+		MaxTickerNewsItems:  d.cfg.DeepSeek.MaxTickerNewsItems,
+		MaxWorldNewsItems:   d.cfg.DeepSeek.MaxWorldNewsItems,
+		MaxNewsTitleChars:   d.cfg.DeepSeek.MaxNewsTitleChars,
+	}
+	userPrompt := BuildUserPrompt(req, todayTraded, limits)
 
 	d.logger.Info("sending analysis request to DeepSeek",
 		"tickers", len(req.Tickers),
-		"positions", len(req.Positions))
+		"positions", len(req.Positions),
+		"prompt_length", len([]rune(userPrompt)))
 
 	stream, err := d.client.CreateChatCompletionStream(ctx, openai.ChatCompletionRequest{
 		Model: d.model,

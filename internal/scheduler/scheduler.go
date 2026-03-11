@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/camuig/rus-trader/internal/ai"
@@ -107,8 +108,8 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 
 	s.logger.Info("starting analysis cycle")
 
-	// 1. Fetch top tickers from MOEX
-	topTickers, err := s.moex.FetchTopTickers(ctx, 10)
+	// 1. Fetch top tickers from MOEX (fetch more, filter later)
+	topTickers, err := s.moex.FetchTopTickers(ctx, 50)
 	if err != nil {
 		s.logger.Error("fetch top tickers", "error", err)
 		s.saveAnalysisLog(0, "", "", err)
@@ -141,13 +142,20 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 		return false
 	}
 
+	// Collect tradable tickers preserving MOEX volume ranking order
+	maxTickers := s.config.Trading.MaxAnalysisTickers
+	tradableTickers := make([]string, 0, maxTickers)
 	tradableSet := make(map[string]bool)
 	for _, uid := range uids {
 		if tradable[uid] {
-			tradableSet[uidToTicker[uid]] = true
+			t := uidToTicker[uid]
+			tradableSet[t] = true
+			if len(tradableTickers) < maxTickers {
+				tradableTickers = append(tradableTickers, t)
+			}
 		}
 	}
-	s.logger.Info("tradable tickers", "count", len(tradableSet))
+	s.logger.Info("tradable tickers", "total", len(tradableSet), "selected", len(tradableTickers))
 
 	// 3. Get portfolio early — we need position tickers before fetching candles
 	portfolio, err := s.broker.GetPortfolio()
@@ -157,17 +165,13 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 		return false
 	}
 
-	// 4. Ensure tickers with open positions are always included
+	// 4. Ensure tickers with open positions are always included (even beyond limit)
 	for _, pos := range portfolio.Positions {
 		if pos.Ticker != "" && !tradableSet[pos.Ticker] {
 			tradableSet[pos.Ticker] = true
+			tradableTickers = append(tradableTickers, pos.Ticker)
 			s.logger.Info("added position ticker to analysis", "ticker", pos.Ticker)
 		}
-	}
-
-	tradableTickers := make([]string, 0, len(tradableSet))
-	for t := range tradableSet {
-		tradableTickers = append(tradableTickers, t)
 	}
 
 	if len(tradableTickers) == 0 {
@@ -180,6 +184,9 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 	snapshots := s.broker.FetchCandleSnapshots(tradableTickers, concurrency)
 	s.logger.Info("candle snapshots fetched", "count", len(snapshots))
 
+	// 6. Fetch ticker briefs (cached, non-fatal)
+	tickerBriefs := s.fetchTickerBriefs(tradableTickers)
+
 	// 6. Fetch news and filter by tickers
 	allNews, err := s.moex.FetchRecentNews(ctx)
 	if err != nil {
@@ -189,11 +196,30 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 	}
 	tickerNews := moex.FilterNewsForTickers(allNews, tradableTickers)
 
-	// 7. Build TickerAnalysis with OHLCV data and news
+	// 7. Fetch world news (non-fatal)
+	worldCtx, cancelWorld := context.WithTimeout(ctx, 8*time.Second)
+	worldNewsItems, err := s.moex.FetchWorldNews(worldCtx, s.config.DeepSeek.MaxWorldNewsItems*2)
+	cancelWorld()
+	if err != nil {
+		s.logger.Error("fetch world news", "error", err)
+		worldNewsItems = nil
+	}
+	globalNews := make([]string, 0, len(worldNewsItems))
+	for _, n := range worldNewsItems {
+		if n.Source != "" {
+			globalNews = append(globalNews, fmt.Sprintf("%s: %s", n.Source, n.Title))
+		} else {
+			globalNews = append(globalNews, n.Title)
+		}
+	}
+	s.logger.Info("world news fetched", "count", len(globalNews))
+
+	// 8. Build TickerAnalysis with OHLCV data and news
 	tickerAnalyses := make([]ai.TickerAnalysis, 0, len(snapshots))
 	for _, snap := range snapshots {
 		ta := ai.TickerAnalysis{
 			Ticker:    snap.Ticker,
+			Brief:     tickerBriefs[snap.Ticker],
 			LastPrice: snap.LastPrice,
 			Period3h:  toPeriodData(snap.Period3h),
 			Period1d:  toPeriodData(snap.Period1d),
@@ -210,7 +236,7 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 		tickerAnalyses = append(tickerAnalyses, ta)
 	}
 
-	// 8. Fetch recent closed trades for AI context
+	// 9. Fetch recent closed trades for AI context
 	var recentTrades []ai.RecentClosedTrade
 	if closedTrades, err := s.repo.GetClosedTradesLast24h(); err == nil {
 		for _, t := range closedTrades {
@@ -230,7 +256,7 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 		}
 	}
 
-	// 9. Fetch open trade context for AI (including SL/TP plan)
+	// 10. Fetch open trade context for AI (including SL/TP plan)
 	openContext := make(map[string]ai.OpenTradeContext)
 	if openTrades, err := s.repo.GetOpenTrades(); err == nil {
 		for _, t := range openTrades {
@@ -243,12 +269,13 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 		}
 	}
 
-	// 10. Fetch today's traded tickers for anti-churning
+	// 11. Fetch today's traded tickers for anti-churning
 	todayTraded, _ := s.repo.GetTodayTradedTickers()
 
-	// 11. AI analysis
+	// 12. AI analysis
 	analysisReq := &ai.AnalysisRequest{
 		Tickers:      tickerAnalyses,
+		GlobalNews:   globalNews,
 		Positions:    portfolio.Positions,
 		RecentTrades: recentTrades,
 		OpenContext:  openContext,
@@ -351,4 +378,42 @@ func (s *Scheduler) savePortfolioSnapshot(portfolio *broker.PortfolioInfo) {
 	if err := s.repo.SavePortfolioSnapshot(snapshot); err != nil {
 		s.logger.Error("save portfolio snapshot", "error", err)
 	}
+}
+
+func (s *Scheduler) fetchTickerBriefs(tickers []string) map[string]string {
+	if len(tickers) == 0 {
+		return nil
+	}
+
+	result := make(map[string]string, len(tickers))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 5)
+
+	for _, ticker := range tickers {
+		t := ticker
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			brief, err := s.broker.GetTickerBrief(t)
+			if err != nil {
+				s.logger.Debug("fetch ticker brief failed", "ticker", t, "error", err)
+				return
+			}
+			if brief == "" {
+				return
+			}
+
+			mu.Lock()
+			result[t] = brief
+			mu.Unlock()
+		}()
+	}
+
+	wg.Wait()
+	s.logger.Info("ticker briefs fetched", "count", len(result))
+	return result
 }

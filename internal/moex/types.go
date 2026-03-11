@@ -10,6 +10,7 @@ type MarketTicker struct {
 
 type NewsItem struct {
 	ID        int64
+	Source    string
 	Title     string
 	Published time.Time
 }

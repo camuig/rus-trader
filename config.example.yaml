@@ -18,6 +18,16 @@ deepseek:
   model: "deepseek-reasoner"
   # Request timeout in seconds (R1 reasoning takes 30-90s)
   timeout_seconds: 120
+  # Hard limit for full user prompt size (characters)
+  prompt_max_chars: 12000
+  # Max total chars for "ticker briefs" section
+  max_ticker_brief_chars: 900
+  # Max ticker-specific news lines in prompt
+  max_ticker_news_items: 8
+  # Max world news lines in prompt
+  max_world_news_items: 5
+  # Max headline/title length after truncation
+  max_news_title_chars: 120
 
 # Trading parameters
 trading:
@@ -31,6 +41,8 @@ trading:
   default_stop_loss_pct: 3.0
   # Default Take-Profit percentage (e.g., 5 = 5% above entry)
   default_take_profit_pct: 5.0
+  # Maximum number of tickers to send for AI analysis per cycle
+  max_analysis_tickers: 10
 
 # Telegram notifications (optional)
 telegram:

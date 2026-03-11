@@ -24,9 +24,14 @@ type TinkoffConfig struct {
 }
 
 type DeepSeekConfig struct {
-	APIKey         string `yaml:"api_key"`
-	Model          string `yaml:"model"`
-	TimeoutSeconds int    `yaml:"timeout_seconds"`
+	APIKey              string `yaml:"api_key"`
+	Model               string `yaml:"model"`
+	TimeoutSeconds      int    `yaml:"timeout_seconds"`
+	PromptMaxChars      int    `yaml:"prompt_max_chars"`
+	MaxTickerBriefChars int    `yaml:"max_ticker_brief_chars"`
+	MaxTickerNewsItems  int    `yaml:"max_ticker_news_items"`
+	MaxWorldNewsItems   int    `yaml:"max_world_news_items"`
+	MaxNewsTitleChars   int    `yaml:"max_news_title_chars"`
 }
 
 type TradingConfig struct {
@@ -40,6 +45,7 @@ type TradingConfig struct {
 	MinHoldMinutes       int     `yaml:"min_hold_minutes"`
 	MaxOpenPositions     int     `yaml:"max_open_positions"`
 	MaxDailyTrades       int     `yaml:"max_daily_trades"`
+	MaxAnalysisTickers   int     `yaml:"max_analysis_tickers"`
 	CommissionPct        float64 `yaml:"commission_pct"`
 }
 
@@ -84,6 +90,21 @@ func setDefaults(cfg *Config) {
 	if cfg.DeepSeek.TimeoutSeconds == 0 {
 		cfg.DeepSeek.TimeoutSeconds = 180
 	}
+	if cfg.DeepSeek.PromptMaxChars == 0 {
+		cfg.DeepSeek.PromptMaxChars = 12000
+	}
+	if cfg.DeepSeek.MaxTickerBriefChars == 0 {
+		cfg.DeepSeek.MaxTickerBriefChars = 900
+	}
+	if cfg.DeepSeek.MaxTickerNewsItems == 0 {
+		cfg.DeepSeek.MaxTickerNewsItems = 8
+	}
+	if cfg.DeepSeek.MaxWorldNewsItems == 0 {
+		cfg.DeepSeek.MaxWorldNewsItems = 5
+	}
+	if cfg.DeepSeek.MaxNewsTitleChars == 0 {
+		cfg.DeepSeek.MaxNewsTitleChars = 120
+	}
 	if cfg.Trading.Interval == "" {
 		cfg.Trading.Interval = "15m"
 	}
@@ -113,6 +134,9 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.Trading.MaxDailyTrades == 0 {
 		cfg.Trading.MaxDailyTrades = 8
+	}
+	if cfg.Trading.MaxAnalysisTickers == 0 {
+		cfg.Trading.MaxAnalysisTickers = 10
 	}
 	if cfg.Trading.CommissionPct == 0 {
 		cfg.Trading.CommissionPct = 0.025

@@ -14,26 +14,26 @@ const newsBaseURL = "https://iss.moex.com/iss/sitenews.json?lang=ru"
 
 // tickerToNames maps tickers to Russian company names for news matching.
 var tickerToNames = map[string][]string{
-	"SBER":  {"Сбербанк", "Сбер"},
-	"GAZP":  {"Газпром"},
-	"LKOH":  {"Лукойл", "ЛУКОЙЛ"},
-	"GMKN":  {"Норникель", "Норильский никель"},
-	"NVTK":  {"Новатэк", "НОВАТЭК"},
-	"ROSN":  {"Роснефть"},
-	"YNDX":  {"Яндекс"},
-	"TCSG":  {"Тинькофф", "Т-Банк", "TCS"},
-	"MTSS":  {"МТС"},
-	"MGNT":  {"Магнит"},
-	"PLZL":  {"Полюс"},
-	"CHMF":  {"Северсталь"},
-	"ALRS":  {"Алроса", "АЛРОСА"},
-	"SNGS":  {"Сургутнефтегаз"},
-	"VTBR":  {"ВТБ"},
-	"MOEX":  {"Мосбиржа", "Московская биржа"},
-	"TATN":  {"Татнефть"},
-	"NLMK":  {"НЛМК"},
-	"PHOR":  {"ФосАгро"},
-	"IRAO":  {"Интер РАО"},
+	"SBER": {"Сбербанк", "Сбер"},
+	"GAZP": {"Газпром"},
+	"LKOH": {"Лукойл", "ЛУКОЙЛ"},
+	"GMKN": {"Норникель", "Норильский никель"},
+	"NVTK": {"Новатэк", "НОВАТЭК"},
+	"ROSN": {"Роснефть"},
+	"YNDX": {"Яндекс"},
+	"TCSG": {"Тинькофф", "Т-Банк", "TCS"},
+	"MTSS": {"МТС"},
+	"MGNT": {"Магнит"},
+	"PLZL": {"Полюс"},
+	"CHMF": {"Северсталь"},
+	"ALRS": {"Алроса", "АЛРОСА"},
+	"SNGS": {"Сургутнефтегаз"},
+	"VTBR": {"ВТБ"},
+	"MOEX": {"Мосбиржа", "Московская биржа"},
+	"TATN": {"Татнефть"},
+	"NLMK": {"НЛМК"},
+	"PHOR": {"ФосАгро"},
+	"IRAO": {"Интер РАО"},
 }
 
 type issNewsResponse struct {
@@ -114,6 +114,7 @@ func (c *Client) FetchRecentNews(ctx context.Context) ([]NewsItem, error) {
 
 			allNews = append(allNews, NewsItem{
 				ID:        id,
+				Source:    "MOEX",
 				Title:     title,
 				Published: published,
 			})
