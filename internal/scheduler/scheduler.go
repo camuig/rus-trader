@@ -12,8 +12,10 @@ import (
 	"github.com/camuig/rus-trader/internal/config"
 	"github.com/camuig/rus-trader/internal/executor"
 	"github.com/camuig/rus-trader/internal/guard"
+	"github.com/camuig/rus-trader/internal/indicators"
 	"github.com/camuig/rus-trader/internal/logger"
 	"github.com/camuig/rus-trader/internal/moex"
+	"github.com/camuig/rus-trader/internal/screener"
 	"github.com/camuig/rus-trader/internal/storage"
 	"github.com/camuig/rus-trader/internal/telegram"
 )
@@ -181,8 +183,16 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 
 	// 5. Fetch candle snapshots
 	concurrency := s.config.Trading.CandleConcurrency
-	snapshots := s.broker.FetchCandleSnapshots(tradableTickers, concurrency)
-	s.logger.Info("candle snapshots fetched", "count", len(snapshots))
+	allSnapshots := s.broker.FetchCandleSnapshots(tradableTickers, concurrency)
+	s.logger.Info("candle snapshots fetched", "count", len(allSnapshots))
+
+	// 5a. Screen tickers by technical signals (keep positions, filter rest by score)
+	positionTickers := make(map[string]bool, len(portfolio.Positions))
+	for _, pos := range portfolio.Positions {
+		positionTickers[pos.Ticker] = true
+	}
+	snapshots := screener.Screen(allSnapshots, positionTickers, s.config.Trading.MaxAnalysisTickers)
+	s.logger.Info("screened tickers", "before", len(allSnapshots), "after", len(snapshots))
 
 	// 6. Fetch ticker briefs (cached, non-fatal)
 	tickerBriefs := s.fetchTickerBriefs(tradableTickers)
@@ -214,17 +224,18 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 	}
 	s.logger.Info("world news fetched", "count", len(globalNews))
 
-	// 8. Build TickerAnalysis with OHLCV data and news
+	// 8. Build TickerAnalysis with OHLCV data, indicators, and news
 	tickerAnalyses := make([]ai.TickerAnalysis, 0, len(snapshots))
 	for _, snap := range snapshots {
 		ta := ai.TickerAnalysis{
-			Ticker:    snap.Ticker,
-			Brief:     tickerBriefs[snap.Ticker],
-			LastPrice: snap.LastPrice,
-			Period3h:  toPeriodData(snap.Period3h),
-			Period1d:  toPeriodData(snap.Period1d),
-			Period3d:  toPeriodData(snap.Period3d),
-			Period1w:  toPeriodData(snap.Period1w),
+			Ticker:     snap.Ticker,
+			Brief:      tickerBriefs[snap.Ticker],
+			LastPrice:  snap.LastPrice,
+			Period3h:   toPeriodData(snap.Period3h),
+			Period1d:   toPeriodData(snap.Period1d),
+			Period3d:   toPeriodData(snap.Period3d),
+			Period1w:   toPeriodData(snap.Period1w),
+			Indicators: snap.Indicators,
 		}
 
 		if items, ok := tickerNews[snap.Ticker]; ok {
@@ -272,6 +283,9 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 	// 11. Fetch today's traded tickers for anti-churning
 	todayTraded, _ := s.repo.GetTodayTradedTickers()
 
+	// 11a. Fetch performance stats for AI context
+	stats := s.fetchPerformanceStats()
+
 	// 12. AI analysis
 	analysisReq := &ai.AnalysisRequest{
 		Tickers:      tickerAnalyses,
@@ -281,6 +295,8 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 		OpenContext:  openContext,
 		AvailableRub: portfolio.AvailableRub,
 		TotalRub:     portfolio.TotalRub,
+		Stats:        stats,
+		CurrentTime:  time.Now().In(s.loc),
 	}
 
 	decisions, rawResponse, err := s.ai.Analyze(ctx, analysisReq, todayTraded)
@@ -297,7 +313,12 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 			"confidence", d.Confidence, "reasoning", d.Reasoning)
 	}
 
-	// 13. Apply TradeGuard filter
+	// 13. Set indicators in guard for pre-validation and apply filter
+	indicatorsMap := make(map[string]indicators.Indicators, len(snapshots))
+	for _, snap := range snapshots {
+		indicatorsMap[snap.Ticker] = snap.Indicators
+	}
+	s.guard.SetIndicators(indicatorsMap)
 	allowed, blocked := s.guard.Filter(decisions)
 	for _, b := range blocked {
 		s.notifier.NotifyBlocked(b.Decision.Ticker, b.Decision.Action, b.Reason)
@@ -309,6 +330,11 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 	}
 	s.logger.Info("guard filter applied",
 		"allowed", len(allowedDecisions), "blocked", len(blocked))
+
+	// 13a. Update trailing stops for open positions
+	if s.config.Trading.TrailingStopEnabled {
+		s.updateTrailingStops(portfolio)
+	}
 
 	// 14. Execute decisions
 	s.executor.Execute(allowedDecisions)
@@ -377,6 +403,100 @@ func (s *Scheduler) savePortfolioSnapshot(portfolio *broker.PortfolioInfo) {
 	}
 	if err := s.repo.SavePortfolioSnapshot(snapshot); err != nil {
 		s.logger.Error("save portfolio snapshot", "error", err)
+	}
+}
+
+func (s *Scheduler) updateTrailingStops(portfolio *broker.PortfolioInfo) {
+	openTrades, err := s.repo.GetOpenTrades()
+	if err != nil {
+		s.logger.Error("trailing stop: get open trades", "error", err)
+		return
+	}
+
+	cfg := s.config.Trading
+	breakevenPct := cfg.TrailingBreakevenPct / 100  // e.g., 0.50
+	lockProfitPct := cfg.TrailingLockProfitPct / 100 // e.g., 0.75
+
+	for _, trade := range openTrades {
+		if trade.TakeProfitPrice <= 0 || trade.StopLossPrice <= 0 || trade.Price <= 0 {
+			continue
+		}
+
+		// Find current price from portfolio
+		var currentPrice float64
+		for _, pos := range portfolio.Positions {
+			if pos.Ticker == trade.Ticker {
+				currentPrice = pos.CurrentPrice
+				break
+			}
+		}
+		if currentPrice <= 0 {
+			continue
+		}
+
+		tpDistance := trade.TakeProfitPrice - trade.Price
+		if tpDistance <= 0 {
+			continue
+		}
+
+		progress := (currentPrice - trade.Price) / tpDistance // 0 to 1+
+		var newSL float64
+
+		if progress >= lockProfitPct {
+			// Lock 50% of current profit
+			profit := currentPrice - trade.Price
+			newSL = trade.Price + profit*0.5
+		} else if progress >= breakevenPct {
+			// Move SL to breakeven (entry price + small buffer)
+			newSL = trade.Price * 1.001
+		}
+
+		if newSL <= 0 || newSL <= trade.StopLossPrice {
+			continue // only move SL up, never down
+		}
+
+		s.logger.Info("trailing stop: updating SL",
+			"ticker", trade.Ticker, "oldSL", trade.StopLossPrice,
+			"newSL", newSL, "progress", fmt.Sprintf("%.0f%%", progress*100))
+
+		// Cancel old SL and place new one
+		instrumentUID, err := s.broker.ResolveTickerToUID(trade.Ticker)
+		if err != nil {
+			s.logger.Error("trailing stop: resolve ticker", "ticker", trade.Ticker, "error", err)
+			continue
+		}
+
+		if trade.StopLossOrderID != "" {
+			s.broker.CancelStopOrders(trade.StopLossOrderID, "")
+		}
+
+		newSLOrderID, err := s.broker.PlaceStopLoss(instrumentUID, trade.Quantity, newSL)
+		if err != nil {
+			s.logger.Error("trailing stop: place new SL", "ticker", trade.Ticker, "error", err)
+			continue
+		}
+
+		trade.StopLossPrice = newSL
+		trade.StopLossOrderID = newSLOrderID
+		if err := s.repo.UpdateTrade(&trade); err != nil {
+			s.logger.Error("trailing stop: update trade", "error", err)
+		}
+	}
+}
+
+func (s *Scheduler) fetchPerformanceStats() ai.PerformanceStats {
+	stats, err := s.repo.GetPerformanceStats7d()
+	if err != nil {
+		s.logger.Error("fetch performance stats", "error", err)
+		return ai.PerformanceStats{}
+	}
+	return ai.PerformanceStats{
+		WinRate7d:    stats.WinRate,
+		AvgProfit:    stats.AvgProfit,
+		AvgLoss:      stats.AvgLoss,
+		TotalPnL7d:   stats.TotalPnL,
+		TradeCount7d: stats.TradeCount,
+		WorstTickers: stats.WorstTickers,
 	}
 }
 

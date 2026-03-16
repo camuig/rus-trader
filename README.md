@@ -15,9 +15,15 @@ MOEX ISS API → новости за 24ч → фильтр по тикерам
       ↓
 T-Invest SDK → текущий портфель
       ↓
-DeepSeek R1  → анализ данных → JSON решения (BUY/SELL/HOLD)
+Indicators   → RSI(14), EMA(9/21), ATR(14), RelVol, S/R уровни
       ↓
-Executor     → рыночные ордера + SL/TP
+Screener     → фильтрация тикеров по силе сигнала
+      ↓
+DeepSeek R1  → анализ индикаторов + OHLCV + новостей → JSON решения
+      ↓
+TradeGuard   → pre-validation (RSI > 80, время суток, лимиты)
+      ↓
+Executor     → лимитные ордера + SL/TP + trailing stop
       ↓
 SQLite + Telegram + Web Dashboard
 ```
@@ -100,6 +106,12 @@ go run ./cmd/closeall/ -config config.yaml
 | `trading.default_stop_loss_pct` | Stop-Loss % | `3.0` |
 | `trading.default_take_profit_pct` | Take-Profit % | `5.0` |
 | `trading.candle_concurrency` | Параллелизм загрузки свечей | `10` |
+| `trading.max_spread_pct` | Макс. спред bid/ask для BUY (%) | `0.3` |
+| `trading.trailing_stop_enabled` | Включить trailing stop | `false` |
+| `trading.trailing_breakeven_pct` | % к TP для переноса SL на безубыток | `50` |
+| `trading.trailing_lock_profit_pct` | % к TP для фиксации 50% прибыли | `75` |
+| `trading.limit_order_slippage` | Отступ для лимитных ордеров (%), 0=market | `0.1` |
+| `trading.no_last_hour_buy` | Запрет BUY в последний час торгов | `false` |
 | `telegram.enabled` | Включить уведомления | `false` |
 | `telegram.bot_token` | Токен Telegram бота | |
 | `telegram.chat_id` | Chat ID для уведомлений | |
@@ -111,6 +123,34 @@ go run ./cmd/closeall/ -config config.yaml
 2. Узнайте свой Chat ID через [@userinfobot](https://t.me/userinfobot)
 3. Укажите `bot_token` и `chat_id` в `config.yaml`
 4. Установите `telegram.enabled: true`
+
+## Торговые улучшения
+
+### Технические индикаторы
+Бот автоматически рассчитывает RSI(14), EMA(9), EMA(21), ATR(14), относительный объём и уровни поддержки/сопротивления для каждого тикера. Индикаторы передаются в AI для более точного анализа.
+
+### Предварительный скрининг
+Перед отправкой в AI тикеры ранжируются по силе технического сигнала (RSI-экстремумы, EMA-кроссоверы, аномальные объёмы). В анализ попадают только самые перспективные кандидаты.
+
+### Trailing Stop
+При включении (`trailing_stop_enabled: true`) бот автоматически подтягивает SL:
+- При достижении 50% пути к TP — SL переносится на безубыток
+- При достижении 75% пути к TP — SL фиксирует 50% прибыли
+
+### Масштабирование позиций
+Размер позиции зависит от уверенности AI: confidence 90+ = 100%, 80-89 = 75%, 70-79 = 50% от `max_position_rub`.
+
+### Лимитные ордера
+При `limit_order_slippage > 0` вместо рыночных ордеров используются лимитные с указанным отступом от текущей цены, что снижает проскальзывание.
+
+### Фильтр по спреду
+Перед покупкой проверяется bid/ask спред. Тикеры со спредом выше `max_spread_pct` пропускаются.
+
+### Pre-validation решений
+TradeGuard механически блокирует BUY при RSI > 80 (перекупленность) и в последний час торгов (17:50-18:50 MSK).
+
+### Статистика в промпте
+AI получает агрегированную статистику за 7 дней: win rate, средний профит/убыток, худшие тикеры — для более осознанных решений.
 
 ## Торговые часы
 

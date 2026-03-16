@@ -92,3 +92,46 @@ func (bc *BrokerClient) GetAvailableRub() (float64, error) {
 	}
 	return portfolio.AvailableRub, nil
 }
+
+// GetLastPrice fetches the last trade price for an instrument via market data.
+func (bc *BrokerClient) GetLastPrice(instrumentUID string) float64 {
+	md := bc.Client.NewMarketDataServiceClient()
+	resp, err := md.GetLastPrices([]string{instrumentUID})
+	if err != nil {
+		bc.Logger.Error("get last price", "instrument", instrumentUID, "error", err)
+		return 0
+	}
+	for _, lp := range resp.GetLastPrices() {
+		if lp.GetInstrumentUid() == instrumentUID {
+			if p := lp.GetPrice(); p != nil {
+				return p.ToFloat()
+			}
+		}
+	}
+	return 0
+}
+
+// GetSpreadPct fetches the orderbook and calculates bid/ask spread as percentage.
+// Returns 0 if orderbook is unavailable (e.g., sandbox mode).
+func (bc *BrokerClient) GetSpreadPct(instrumentUID string) float64 {
+	md := bc.Client.NewMarketDataServiceClient()
+	resp, err := md.GetOrderBook(instrumentUID, 1) // depth=1, only best bid/ask
+	if err != nil {
+		bc.Logger.Debug("get orderbook", "instrument", instrumentUID, "error", err)
+		return 0
+	}
+
+	asks := resp.GetAsks()
+	bids := resp.GetBids()
+	if len(asks) == 0 || len(bids) == 0 {
+		return 0
+	}
+
+	bestAsk := asks[0].GetPrice().ToFloat()
+	bestBid := bids[0].GetPrice().ToFloat()
+	if bestBid <= 0 {
+		return 0
+	}
+
+	return (bestAsk - bestBid) / bestBid * 100
+}

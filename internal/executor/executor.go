@@ -79,7 +79,8 @@ func (e *Executor) executeBuy(d ai.AIDecision) {
 		return
 	}
 
-	maxPosition := e.config.Trading.MaxPositionRub
+	// Scale position size by confidence
+	maxPosition := scalePositionByConfidence(e.config.Trading.MaxPositionRub, d.Confidence)
 	if maxPosition > availableRub {
 		maxPosition = availableRub
 	}
@@ -91,24 +92,44 @@ func (e *Executor) executeBuy(d ai.AIDecision) {
 		return
 	}
 
-	// Calculate lots (using signal price as estimate)
-	estimatedPrice := d.StopLoss * 1.05 // approximate current price from SL
-	if estimatedPrice <= 0 {
-		estimatedPrice = d.TakeProfit * 0.95
+	// Get real last price for lots calculation
+	lastPrice := e.broker.GetLastPrice(instrumentUID)
+	if lastPrice <= 0 {
+		// Fallback to estimate from SL/TP
+		lastPrice = d.StopLoss * 1.05
+		if lastPrice <= 0 {
+			lastPrice = d.TakeProfit * 0.95
+		}
 	}
-	if estimatedPrice <= 0 {
-		e.logger.Error("cannot estimate price for lots calculation", "ticker", d.Ticker)
+	if lastPrice <= 0 {
+		e.logger.Error("cannot determine price for lots calculation", "ticker", d.Ticker)
 		return
 	}
 
-	lots := e.broker.CalculateLots(instrumentUID, estimatedPrice, maxPosition)
+	// Check spread before buying
+	spreadPct := e.broker.GetSpreadPct(instrumentUID)
+	maxSpread := e.config.Trading.MaxSpreadPct
+	if maxSpread > 0 && spreadPct > maxSpread {
+		e.logger.Info("BUY skipped: spread too wide",
+			"ticker", d.Ticker, "spread", spreadPct, "max", maxSpread)
+		return
+	}
+
+	lots := e.broker.CalculateLots(instrumentUID, lastPrice, maxPosition)
 	if lots < 1 {
 		e.logger.Info("BUY skipped: insufficient balance for 1 lot", "ticker", d.Ticker)
 		return
 	}
 
-	// Execute buy order
-	result, err := e.broker.Buy(instrumentUID, lots)
+	// Execute buy order (limit if configured, otherwise market)
+	var result *broker.OrderResult
+	slippage := e.config.Trading.LimitOrderSlippage
+	if slippage > 0 && lastPrice > 0 {
+		limitPrice := lastPrice * (1 + slippage/100)
+		result, err = e.broker.BuyWithPrice(instrumentUID, lots, limitPrice)
+	} else {
+		result, err = e.broker.Buy(instrumentUID, lots)
+	}
 	if err != nil {
 		e.logger.Error("buy order failed", "ticker", d.Ticker, "error", err)
 		e.notifier.NotifyError("BUY "+d.Ticker, err)
@@ -169,7 +190,20 @@ func (e *Executor) executeSell(d ai.AIDecision) {
 		return
 	}
 
-	result, err := e.broker.Sell(instrumentUID, openTrade.Quantity)
+	// Execute sell order (limit if configured, otherwise market)
+	var result *broker.OrderResult
+	slippage := e.config.Trading.LimitOrderSlippage
+	if slippage > 0 {
+		lastPrice := e.broker.GetLastPrice(instrumentUID)
+		if lastPrice > 0 {
+			limitPrice := lastPrice * (1 - slippage/100)
+			result, err = e.broker.SellWithPrice(instrumentUID, openTrade.Quantity, limitPrice)
+		} else {
+			result, err = e.broker.Sell(instrumentUID, openTrade.Quantity)
+		}
+	} else {
+		result, err = e.broker.Sell(instrumentUID, openTrade.Quantity)
+	}
 	if err != nil {
 		e.logger.Error("sell order failed", "ticker", d.Ticker, "error", err)
 		e.notifier.NotifyError("SELL "+d.Ticker, err)
@@ -210,6 +244,18 @@ func (e *Executor) executeSell(d ai.AIDecision) {
 	e.notifier.NotifySell(d.Ticker, result.ExecutedPrice, result.ExecutedLots, pnl, d.Reasoning)
 	e.logger.Info("SELL executed",
 		"ticker", d.Ticker, "price", result.ExecutedPrice, "lots", result.ExecutedLots, "pnl", pnl)
+}
+
+// scalePositionByConfidence scales max position size based on AI confidence level.
+func scalePositionByConfidence(maxRub float64, confidence int) float64 {
+	switch {
+	case confidence >= 90:
+		return maxRub // 100%
+	case confidence >= 80:
+		return maxRub * 0.75 // 75%
+	default:
+		return maxRub * 0.50 // 50%
+	}
 }
 
 func DecisionsToJSON(decisions []ai.AIDecision) string {

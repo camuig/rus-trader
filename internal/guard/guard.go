@@ -7,6 +7,7 @@ import (
 
 	"github.com/camuig/rus-trader/internal/ai"
 	"github.com/camuig/rus-trader/internal/config"
+	"github.com/camuig/rus-trader/internal/indicators"
 	"github.com/camuig/rus-trader/internal/logger"
 	"github.com/camuig/rus-trader/internal/storage"
 )
@@ -17,9 +18,11 @@ type BlockedDecision struct {
 }
 
 type TradeGuard struct {
-	repo   *storage.Repository
-	config *config.Config
-	logger *logger.Logger
+	repo       *storage.Repository
+	config     *config.Config
+	logger     *logger.Logger
+	indicators map[string]indicators.Indicators // ticker -> indicators
+	loc        *time.Location                   // MSK timezone
 }
 
 type filterState struct {
@@ -36,10 +39,17 @@ type filterState struct {
 
 func NewTradeGuard(repo *storage.Repository, cfg *config.Config, log *logger.Logger) *TradeGuard {
 	return &TradeGuard{
-		repo:   repo,
-		config: cfg,
-		logger: log,
+		repo:       repo,
+		config:     cfg,
+		logger:     log,
+		indicators: make(map[string]indicators.Indicators),
+		loc:        cfg.MOEXLocation(),
 	}
+}
+
+// SetIndicators sets technical indicators for use in pre-validation.
+func (g *TradeGuard) SetIndicators(ind map[string]indicators.Indicators) {
+	g.indicators = ind
 }
 
 func (g *TradeGuard) Filter(decisions []ai.AIDecision) (allowed, blocked []BlockedDecision) {
@@ -116,6 +126,22 @@ func (g *TradeGuard) checkBuy(d ai.AIDecision, state *filterState) string {
 	// 3. Max daily trades
 	if state.dailyBuysKnown && state.dailyBuys >= cfg.MaxDailyTrades {
 		return fmt.Sprintf("лимит сделок за день (%d/%d)", state.dailyBuys, cfg.MaxDailyTrades)
+	}
+
+	// 4. Pre-validation: RSI overbought check
+	if ind, ok := g.indicators[d.Ticker]; ok {
+		if ind.RSI14 > 80 {
+			return fmt.Sprintf("RSI перекуплен (%.1f > 80)", ind.RSI14)
+		}
+	}
+
+	// 5. Pre-validation: no BUY in last hour of trading
+	if cfg.NoLastHourBuy {
+		now := time.Now().In(g.loc)
+		totalMinutes := now.Hour()*60 + now.Minute()
+		if totalMinutes >= 1070 { // 17:50 MSK
+			return "запрет BUY в последний час торгов"
+		}
 	}
 
 	return ""

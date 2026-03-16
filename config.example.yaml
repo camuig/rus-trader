@@ -19,7 +19,7 @@ deepseek:
   # Request timeout in seconds (R1 reasoning takes 30-90s)
   timeout_seconds: 120
   # Hard limit for full user prompt size (characters)
-  prompt_max_chars: 12000
+  prompt_max_chars: 16000
   # Max total chars for "ticker briefs" section
   max_ticker_brief_chars: 900
   # Max ticker-specific news lines in prompt
@@ -33,7 +33,7 @@ deepseek:
 trading:
   # Interval between analysis cycles (e.g., "15m", "30m", "1h")
   interval: "15m"
-  # Maximum amount (RUB) to invest per single trade
+  # Maximum amount (RUB) to invest per single trade (scaled by confidence)
   max_position_rub: 10000
   # Minimum AI confidence (0-100) to execute a BUY
   min_confidence: 70
@@ -43,6 +43,18 @@ trading:
   default_take_profit_pct: 5.0
   # Maximum number of tickers to send for AI analysis per cycle
   max_analysis_tickers: 10
+  # Maximum bid/ask spread (%) to allow BUY. 0 = disabled
+  max_spread_pct: 0.3
+  # Trailing stop: enable automatic SL adjustment
+  trailing_stop_enabled: true
+  # Trailing stop: % progress to TP to move SL to breakeven (e.g., 50 = 50%)
+  trailing_breakeven_pct: 50
+  # Trailing stop: % progress to TP to lock 50% of profit (e.g., 75 = 75%)
+  trailing_lock_profit_pct: 75
+  # Limit order slippage (%). 0 = use market orders
+  limit_order_slippage: 0.1
+  # Block BUY orders in last hour of trading (17:50-18:50 MSK)
+  no_last_hour_buy: true
 
 # Telegram notifications (optional)
 telegram:

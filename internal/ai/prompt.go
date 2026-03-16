@@ -7,13 +7,20 @@ import (
 )
 
 const systemPrompt = `Роль: Трейдер MOEX (горизонт 1-2 дня).
-Задача: Анализ OHLCV, объемов и новостей для принятия решений (BUY, SELL, HOLD).
+Задача: Анализ технических индикаторов, OHLCV, объемов и новостей для принятия решений (BUY, SELL, HOLD).
 
 Алгоритм анализа:
 1. Управление позициями: HOLD, если цена между SL и TP. SELL только при пробое SL, фундаментальном негативе или отсутствии прогресса > 2 дней. Шум ±0.5% игнорировать.
 2. Открытие (BUY): Только при Confidence ≥65. Цель — прибыль >1.5% (учитывай комиссию 0.08%). Тикеры, которые уже в портфеле или торговались сегодня, покупать только если это сильно обосновано.
-3. Технический анализ: Использовать уровни поддержки/сопротивления и всплески объемов на периодах 3ч, 1д, 3д, 1нед.
+3. Технический анализ:
+   - RSI: <30 перепроданность (потенциал BUY), >70 перекупленность (избегать BUY, рассмотреть SELL)
+   - EMA: EMA9 > EMA21 = восходящий тренд, EMA9 < EMA21 = нисходящий
+   - ATR: использовать для расчёта SL (1.5-2 × ATR от входа)
+   - Объём: RelVol > 1.5 подтверждает движение, < 0.5 — слабый сигнал
+   - Уровни поддержки/сопротивления: учитывать при выставлении SL/TP
 4. Риск-менеджмент: Лимит на позицию — 10% депо. Обязательны расчетные SL/TP.
+5. Время суток: Избегать BUY в последний час торгов (после 17:50 MSK) — риск гэпа на открытии.
+6. Статистика: Учитывай win rate и серию убытков. При серии убытков — повышай порог confidence.
 
 Требования к ответу:
 - Строго JSON массив объектов.
@@ -43,6 +50,24 @@ func BuildUserPrompt(req *AnalysisRequest, todayTraded []string, limits PromptLi
 	}
 
 	builder := &cappedBuilder{maxRunes: bodyLimit}
+
+	// Current time context
+	if !req.CurrentTime.IsZero() {
+		builder.WriteString(fmt.Sprintf("## Текущее время: %s MSK\n\n", req.CurrentTime.Format("02.01.2006 15:04")))
+	}
+
+	// Performance stats
+	if req.Stats.TradeCount7d > 0 {
+		builder.WriteString("## Статистика за 7 дней\n")
+		builder.WriteString(fmt.Sprintf("Сделок: %d, Win rate: %.0f%%, P&L: %+.2f ₽\n",
+			req.Stats.TradeCount7d, req.Stats.WinRate7d, req.Stats.TotalPnL7d))
+		builder.WriteString(fmt.Sprintf("Ср. прибыль: +%.2f ₽, Ср. убыток: %.2f ₽\n",
+			req.Stats.AvgProfit, req.Stats.AvgLoss))
+		if len(req.Stats.WorstTickers) > 0 {
+			builder.WriteString(fmt.Sprintf("Худшие тикеры: %s\n", strings.Join(req.Stats.WorstTickers, ", ")))
+		}
+		builder.WriteString("\n")
+	}
 
 	builder.WriteString("## Текущий портфель\n")
 	builder.WriteString(fmt.Sprintf("Общий баланс: %.2f ₽ / Доступно: %.2f ₽\n\n", req.TotalRub, req.AvailableRub))
@@ -122,6 +147,17 @@ func BuildUserPrompt(req *AnalysisRequest, todayTraded []string, limits PromptLi
 					p.name, p.data.Open, p.data.High, p.data.Low, formatVolume(p.data.Volume), p.data.ChangePct))
 			}
 		}
+	}
+	builder.WriteString("\n")
+
+	// Technical indicators section
+	builder.WriteString("## Индикаторы\n")
+	builder.WriteString("Ticker|RSI14|EMA9|EMA21|ATR14|RelVol|Support|Resist\n")
+	for _, t := range req.Tickers {
+		ind := t.Indicators
+		builder.WriteString(fmt.Sprintf("%s|%.1f|%.2f|%.2f|%.2f|%.1fx|%.2f|%.2f\n",
+			t.Ticker, ind.RSI14, ind.EMA9, ind.EMA21, ind.ATR14,
+			ind.RelVolume, ind.Support, ind.Resistance))
 	}
 	builder.WriteString("\n")
 

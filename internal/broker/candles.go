@@ -5,6 +5,8 @@ import (
 	"time"
 
 	pb "github.com/russianinvestments/invest-api-go-sdk/proto"
+
+	"github.com/camuig/rus-trader/internal/indicators"
 )
 
 type PeriodOHLCV struct {
@@ -23,6 +25,8 @@ type CandleSnapshot struct {
 	Period1d      PeriodOHLCV
 	Period3d      PeriodOHLCV
 	Period1w      PeriodOHLCV
+	Indicators    indicators.Indicators
+	HourlyCandles []indicators.Candle // raw hourly candles for screening
 }
 
 func (bc *BrokerClient) FetchCandleSnapshots(tickers []string, concurrency int) []CandleSnapshot {
@@ -87,6 +91,18 @@ func (bc *BrokerClient) fetchOneTicker(ticker string) (*CandleSnapshot, error) {
 		return nil, nil
 	}
 
+	// Convert to indicator candles for technical analysis
+	hourly := make([]indicators.Candle, 0, len(candles))
+	for _, c := range candles {
+		hourly = append(hourly, indicators.Candle{
+			Open:   c.GetOpen().ToFloat(),
+			High:   c.GetHigh().ToFloat(),
+			Low:    c.GetLow().ToFloat(),
+			Close:  c.GetClose().ToFloat(),
+			Volume: float64(c.GetVolume()),
+		})
+	}
+
 	snap := &CandleSnapshot{
 		Ticker:        ticker,
 		InstrumentUID: uid,
@@ -95,6 +111,8 @@ func (bc *BrokerClient) fetchOneTicker(ticker string) (*CandleSnapshot, error) {
 		Period1d:      aggregateOHLCV(candles, now, 24*time.Hour),
 		Period3d:      aggregateOHLCV(candles, now, 3*24*time.Hour),
 		Period1w:      aggregateOHLCV(candles, now, 7*24*time.Hour),
+		Indicators:    indicators.Compute(hourly),
+		HourlyCandles: hourly,
 	}
 
 	return snap, nil

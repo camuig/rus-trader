@@ -126,6 +126,84 @@ func (r *Repository) GetTodayTradedTickers() ([]string, error) {
 	return tickers, err
 }
 
+// Performance Stats
+
+type PerformanceStats7d struct {
+	WinRate      float64
+	AvgProfit    float64
+	AvgLoss      float64
+	TotalPnL     float64
+	TradeCount   int
+	WorstTickers []string
+}
+
+func (r *Repository) GetPerformanceStats7d() (PerformanceStats7d, error) {
+	cutoff := time.Now().Add(-7 * 24 * time.Hour)
+
+	var trades []Trade
+	err := r.db.Where("status = ? AND action = ? AND created_at >= ?", "closed", "SELL", cutoff).
+		Find(&trades).Error
+	if err != nil {
+		return PerformanceStats7d{}, err
+	}
+
+	if len(trades) == 0 {
+		return PerformanceStats7d{}, nil
+	}
+
+	var wins, losses int
+	var totalProfit, totalLoss, totalPnL float64
+	tickerPnL := make(map[string]float64)
+
+	for _, t := range trades {
+		totalPnL += t.PnL
+		tickerPnL[t.Ticker] += t.PnL
+		if t.PnL > 0 {
+			wins++
+			totalProfit += t.PnL
+		} else {
+			losses++
+			totalLoss += t.PnL
+		}
+	}
+
+	stats := PerformanceStats7d{
+		WinRate:    float64(wins) / float64(len(trades)) * 100,
+		TotalPnL:   totalPnL,
+		TradeCount: len(trades),
+	}
+	if wins > 0 {
+		stats.AvgProfit = totalProfit / float64(wins)
+	}
+	if losses > 0 {
+		stats.AvgLoss = totalLoss / float64(losses)
+	}
+
+	// Find worst tickers (up to 3)
+	type tickerScore struct {
+		ticker string
+		pnl    float64
+	}
+	var scores []tickerScore
+	for t, p := range tickerPnL {
+		if p < 0 {
+			scores = append(scores, tickerScore{t, p})
+		}
+	}
+	for i := 0; i < len(scores); i++ {
+		for j := i + 1; j < len(scores); j++ {
+			if scores[j].pnl < scores[i].pnl {
+				scores[i], scores[j] = scores[j], scores[i]
+			}
+		}
+	}
+	for i := 0; i < len(scores) && i < 3; i++ {
+		stats.WorstTickers = append(stats.WorstTickers, scores[i].ticker)
+	}
+
+	return stats, nil
+}
+
 // Analysis Logs
 
 func (r *Repository) SaveAnalysisLog(log *AnalysisLog) error {

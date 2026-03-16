@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/camuig/rus-trader/internal/broker"
+	"github.com/camuig/rus-trader/internal/indicators"
 )
 
 type PeriodData struct {
@@ -16,14 +17,15 @@ type PeriodData struct {
 }
 
 type TickerAnalysis struct {
-	Ticker    string
-	Brief     string // краткая карточка тикера (имя/тип/лот/валюта/страна)
-	LastPrice float64
-	Period3h  PeriodData
-	Period1d  PeriodData
-	Period3d  PeriodData
-	Period1w  PeriodData
-	News      []string // заголовки новостей
+	Ticker     string
+	Brief      string // краткая карточка тикера (имя/тип/лот/валюта/страна)
+	LastPrice  float64
+	Period3h   PeriodData
+	Period1d   PeriodData
+	Period3d   PeriodData
+	Period1w   PeriodData
+	News       []string // заголовки новостей
+	Indicators indicators.Indicators
 }
 
 type RecentClosedTrade struct {
@@ -43,6 +45,16 @@ type OpenTradeContext struct {
 	TakeProfitPrice float64
 }
 
+// PerformanceStats holds aggregated trading performance for AI context.
+type PerformanceStats struct {
+	WinRate7d    float64 // win rate over last 7 days (0-100)
+	AvgProfit    float64 // average profit on winning trades
+	AvgLoss      float64 // average loss on losing trades
+	TotalPnL7d   float64 // total P&L over last 7 days
+	TradeCount7d int     // number of closed trades in 7 days
+	WorstTickers []string // tickers with worst P&L
+}
+
 type AnalysisRequest struct {
 	Tickers      []TickerAnalysis
 	GlobalNews   []string
@@ -51,6 +63,8 @@ type AnalysisRequest struct {
 	OpenContext  map[string]OpenTradeContext // ticker → контекст открытой позиции
 	AvailableRub float64
 	TotalRub     float64
+	Stats        PerformanceStats
+	CurrentTime  time.Time // current time in MSK
 }
 
 type PromptLimits struct {

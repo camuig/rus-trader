@@ -47,6 +47,12 @@ type TradingConfig struct {
 	MaxDailyTrades       int     `yaml:"max_daily_trades"`
 	MaxAnalysisTickers   int     `yaml:"max_analysis_tickers"`
 	CommissionPct        float64 `yaml:"commission_pct"`
+	MaxSpreadPct         float64 `yaml:"max_spread_pct"`         // max bid/ask spread %, 0=disabled
+	TrailingStopEnabled  bool    `yaml:"trailing_stop_enabled"`   // enable trailing stop
+	TrailingBreakevenPct float64 `yaml:"trailing_breakeven_pct"`  // % to TP to move SL to breakeven
+	TrailingLockProfitPct float64 `yaml:"trailing_lock_profit_pct"` // % to TP to lock 50% profit
+	LimitOrderSlippage   float64 `yaml:"limit_order_slippage"`    // % slippage for limit orders, 0=market
+	NoLastHourBuy        bool    `yaml:"no_last_hour_buy"`        // block BUY after 17:50 MSK
 }
 
 type TelegramConfig struct {
@@ -140,6 +146,18 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.Trading.CommissionPct == 0 {
 		cfg.Trading.CommissionPct = 0.025
+	}
+	if cfg.Trading.MaxSpreadPct == 0 {
+		cfg.Trading.MaxSpreadPct = 0.3
+	}
+	if cfg.Trading.TrailingBreakevenPct == 0 {
+		cfg.Trading.TrailingBreakevenPct = 50
+	}
+	if cfg.Trading.TrailingLockProfitPct == 0 {
+		cfg.Trading.TrailingLockProfitPct = 75
+	}
+	if cfg.Trading.LimitOrderSlippage == 0 {
+		cfg.Trading.LimitOrderSlippage = 0.1
 	}
 	if cfg.Web.Port == 0 {
 		cfg.Web.Port = 8080
