@@ -121,3 +121,26 @@ ai_agents:
     max_chars: 12000
     # Use cheaper model for review (empty = use main model)
     model: ""
+
+# Order book metrics (L2 snapshot)
+orderbook:
+  enabled: true
+  depth: 20
+  wall_threshold: 5.0
+  concurrency: 5
+
+# Sentiment scoring (news + SmartLab forum → LLM)
+sentiment:
+  enabled: true
+  model: "deepseek-chat"
+  max_items_per_ticker: 5
+  forum_enabled: true
+  max_forum_posts: 5
+
+# Vector pattern memory (SQLite + OpenRouter embeddings)
+vectordb:
+  enabled: false
+  openrouter_api_key: "sk-or-your-key"
+  embedding_model: "openai/text-embedding-3-small"
+  max_similar_patterns: 5
+  min_similarity: 0.7

@@ -18,6 +18,9 @@ type Config struct {
 	Dividends DividendsConfig `yaml:"dividends"`
 	Journal   JournalConfig   `yaml:"journal"`
 	AIAgents  AIAgentsConfig  `yaml:"ai_agents"`
+	OrderBook OrderBookConfig `yaml:"orderbook"`
+	Sentiment SentimentConfig `yaml:"sentiment"`
+	VectorDB  VectorDBConfig  `yaml:"vectordb"`
 }
 
 type TinkoffConfig struct {
@@ -94,6 +97,29 @@ type JournalConfig struct {
 	MaxLessonsInPrompt int  `yaml:"max_lessons_in_prompt"`
 	MaxLessonAgeDays   int  `yaml:"max_lesson_age_days"`
 	MinTradesForReview int  `yaml:"min_trades_for_review"`
+}
+
+type OrderBookConfig struct {
+	Enabled       bool    `yaml:"enabled"`
+	Depth         int     `yaml:"depth"`
+	WallThreshold float64 `yaml:"wall_threshold"`
+	Concurrency   int     `yaml:"concurrency"`
+}
+
+type SentimentConfig struct {
+	Enabled           bool   `yaml:"enabled"`
+	Model             string `yaml:"model"`
+	MaxItemsPerTicker int    `yaml:"max_items_per_ticker"`
+	ForumEnabled      bool   `yaml:"forum_enabled"`
+	MaxForumPosts     int    `yaml:"max_forum_posts"`
+}
+
+type VectorDBConfig struct {
+	Enabled            bool    `yaml:"enabled"`
+	OpenRouterAPIKey   string  `yaml:"openrouter_api_key"`
+	EmbeddingModel     string  `yaml:"embedding_model"`
+	MaxSimilarPatterns int     `yaml:"max_similar_patterns"`
+	MinSimilarity      float64 `yaml:"min_similarity"`
 }
 
 type AIAgentsConfig struct {
@@ -262,6 +288,33 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.AIAgents.JournalReview.MaxChars == 0 {
 		cfg.AIAgents.JournalReview.MaxChars = 12000
+	}
+	if cfg.OrderBook.Depth == 0 {
+		cfg.OrderBook.Depth = 20
+	}
+	if cfg.OrderBook.WallThreshold == 0 {
+		cfg.OrderBook.WallThreshold = 5.0
+	}
+	if cfg.OrderBook.Concurrency == 0 {
+		cfg.OrderBook.Concurrency = 5
+	}
+	if cfg.Sentiment.Model == "" {
+		cfg.Sentiment.Model = "deepseek-chat"
+	}
+	if cfg.Sentiment.MaxItemsPerTicker == 0 {
+		cfg.Sentiment.MaxItemsPerTicker = 5
+	}
+	if cfg.Sentiment.MaxForumPosts == 0 {
+		cfg.Sentiment.MaxForumPosts = 5
+	}
+	if cfg.VectorDB.EmbeddingModel == "" {
+		cfg.VectorDB.EmbeddingModel = "openai/text-embedding-3-small"
+	}
+	if cfg.VectorDB.MaxSimilarPatterns == 0 {
+		cfg.VectorDB.MaxSimilarPatterns = 5
+	}
+	if cfg.VectorDB.MinSimilarity == 0 {
+		cfg.VectorDB.MinSimilarity = 0.7
 	}
 }
 
