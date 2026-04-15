@@ -65,3 +65,15 @@ type JournalLesson struct {
 	RawResponse    string    `gorm:"type:text" json:"raw_response"`
 	TradesReviewed int       `json:"trades_reviewed"`
 }
+
+type PatternEmbedding struct {
+	ID            uint      `gorm:"primarykey" json:"id"`
+	CreatedAt     time.Time `json:"created_at"`
+	TradeID       uint      `gorm:"not null;index" json:"trade_id"`
+	Ticker        string    `gorm:"not null;index" json:"ticker"`
+	EntryFeatures string    `gorm:"type:text;not null" json:"entry_features"`
+	Embedding     []byte    `gorm:"type:blob;not null" json:"-"`
+	Outcome       string    `json:"outcome"`
+	PnL           float64   `json:"pnl"`
+	HoldHours     float64   `json:"hold_hours"`
+}

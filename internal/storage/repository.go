@@ -339,6 +339,28 @@ func (r *Repository) HasReviewForDate(date string) (bool, error) {
 	return count > 0, err
 }
 
+// Pattern Embeddings
+
+func (r *Repository) SavePatternEmbedding(pe *PatternEmbedding) error {
+	return r.db.Create(pe).Error
+}
+
+func (r *Repository) UpdatePatternOutcome(tradeID uint, outcome string, pnl float64, holdHours float64) error {
+	return r.db.Model(&PatternEmbedding{}).Where("trade_id = ?", tradeID).
+		Updates(map[string]interface{}{
+			"outcome":    outcome,
+			"pnl":        pnl,
+			"hold_hours": holdHours,
+		}).Error
+}
+
+func (r *Repository) GetAllClosedEmbeddings() ([]PatternEmbedding, error) {
+	var patterns []PatternEmbedding
+	err := r.db.Where("outcome != '' AND outcome IS NOT NULL").
+		Find(&patterns).Error
+	return patterns, err
+}
+
 func (r *Repository) GetBuyTradeForSell(ticker string) (*Trade, error) {
 	var trade Trade
 	err := r.db.Where("ticker = ? AND action = ? AND status = ?", ticker, "BUY", "closed").
