@@ -135,3 +135,44 @@ func (bc *BrokerClient) GetSpreadPct(instrumentUID string) float64 {
 
 	return (bestAsk - bestBid) / bestBid * 100
 }
+
+type OrderBookLevel struct {
+	Price  float64
+	Volume int64
+}
+
+type OrderBookRaw struct {
+	Bids    []OrderBookLevel
+	Asks    []OrderBookLevel
+	BestBid float64
+	BestAsk float64
+}
+
+func (bc *BrokerClient) GetOrderBookFull(instrumentUID string, depth int) (*OrderBookRaw, error) {
+	md := bc.Client.NewMarketDataServiceClient()
+	resp, err := md.GetOrderBook(instrumentUID, int32(depth))
+	if err != nil {
+		return nil, err
+	}
+
+	raw := &OrderBookRaw{}
+	for _, b := range resp.GetBids() {
+		raw.Bids = append(raw.Bids, OrderBookLevel{
+			Price:  b.GetPrice().ToFloat(),
+			Volume: b.GetQuantity(),
+		})
+	}
+	for _, a := range resp.GetAsks() {
+		raw.Asks = append(raw.Asks, OrderBookLevel{
+			Price:  a.GetPrice().ToFloat(),
+			Volume: a.GetQuantity(),
+		})
+	}
+	if len(raw.Bids) > 0 {
+		raw.BestBid = raw.Bids[0].Price
+	}
+	if len(raw.Asks) > 0 {
+		raw.BestAsk = raw.Asks[0].Price
+	}
+	return raw, nil
+}
