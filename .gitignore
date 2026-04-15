@@ -11,8 +11,11 @@ data/
 # Binaries
 rus-trader
 bot
+/backtest
 /cmd/bot/bot
+/cmd/backtest/backtest
 !cmd/bot
+!cmd/backtest
 
 # Go
 *.exe
