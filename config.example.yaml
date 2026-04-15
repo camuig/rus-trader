@@ -19,7 +19,7 @@ deepseek:
   # Request timeout in seconds (R1 reasoning takes 30-90s)
   timeout_seconds: 120
   # Hard limit for full user prompt size (characters)
-  prompt_max_chars: 16000
+  prompt_max_chars: 24000
   # Max total chars for "ticker briefs" section
   max_ticker_brief_chars: 900
   # Max ticker-specific news lines in prompt
@@ -39,10 +39,10 @@ trading:
   min_confidence: 70
   # Default Stop-Loss percentage (e.g., 3 = 3% below entry)
   default_stop_loss_pct: 3.0
-  # Default Take-Profit percentage (e.g., 5 = 5% above entry)
-  default_take_profit_pct: 5.0
+  # Default Take-Profit percentage (e.g., 4.5 = 4.5% above entry)
+  default_take_profit_pct: 4.5
   # Maximum number of tickers to send for AI analysis per cycle
-  max_analysis_tickers: 10
+  max_analysis_tickers: 20
   # Maximum bid/ask spread (%) to allow BUY. 0 = disabled
   max_spread_pct: 0.3
   # Trailing stop: enable automatic SL adjustment
@@ -55,6 +55,29 @@ trading:
   limit_order_slippage: 0.1
   # Block BUY orders in last hour of trading (17:50-18:50 MSK)
   no_last_hour_buy: true
+  # Minimum SL distance from entry (%). Floor: AI SL closer than this will be widened.
+  min_stop_loss_pct: 2.0
+  # ATR multiplier for dynamic SL floor: slFloor = max(min_stop_loss_pct, atr_sl_multiplier*ATR/price*100)
+  atr_sl_multiplier: 1.5
+  # Minimum TP distance from entry (%). AI TP closer than this will be overridden
+  min_take_profit_pct: 2.5
+  # Minimum Risk/Reward ratio (TP distance / SL distance). e.g., 1.5 = TP must be 1.5x SL
+  min_risk_reward_ratio: 1.5
+  # Block BUY when EMA9 < EMA21 (downtrend filter)
+  require_uptrend: true
+  # Circuit breaker: stop trading when daily loss exceeds this amount (RUB). 0 = disabled
+  max_daily_loss_rub: 1500
+  # Minimum screener score to include ticker for analysis (0 = include all)
+  min_screener_score: 2
+  # Minimum ATR/price % to allow BUY (filters low-volatility tickers). 0 = disabled
+  min_atr_pct: 1.2
+  # Block BUY on tickers that had losses in last N days. 0 = disabled
+  recent_loss_cooldown_days: 1
+  # Block BUY after N consecutive losing trades on the same ticker (0 = disabled)
+  max_losing_streak_per_ticker: 2
+  # Window (in days) for counting losing streak. Older trades are ignored so blocks
+  # naturally expire and never become permanent. 0 = unlimited (not recommended).
+  losing_streak_window_days: 7
 
 # Telegram notifications (optional)
 telegram:
@@ -73,3 +96,28 @@ web:
 logging:
   # Log level: debug, info, warn, error
   level: "info"
+
+# Dividend calendar (SmartLab)
+dividends:
+  enabled: true
+  cache_ttl_hours: 12
+  lookahead_days: 30
+
+# Trade Journal with daily LLM review
+journal:
+  enabled: true
+  max_lessons_in_prompt: 5
+  max_lesson_age_days: 7
+  min_trades_for_review: 1
+
+# AI agent-specific settings (override deepseek.* per agent)
+ai_agents:
+  screening:
+    max_chars: 16000
+    max_tickers: 20
+  position_manager:
+    max_chars: 8000
+  journal_review:
+    max_chars: 12000
+    # Use cheaper model for review (empty = use main model)
+    model: ""
