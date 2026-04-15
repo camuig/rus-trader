@@ -7,12 +7,15 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/camuig/rus-trader/internal/ai"
 	"github.com/camuig/rus-trader/internal/broker"
 	"github.com/camuig/rus-trader/internal/config"
+	"github.com/camuig/rus-trader/internal/dividends"
 	"github.com/camuig/rus-trader/internal/executor"
 	"github.com/camuig/rus-trader/internal/guard"
+	"github.com/camuig/rus-trader/internal/journal"
 	"github.com/camuig/rus-trader/internal/logger"
 	"github.com/camuig/rus-trader/internal/moex"
 	"github.com/camuig/rus-trader/internal/scheduler"
@@ -68,8 +71,25 @@ func main() {
 	exec := executor.NewExecutor(bc, repo, notifier, cfg, log)
 	moexClient := moex.NewClient(log)
 	tradeGuard := guard.NewTradeGuard(repo, cfg, log)
-	sched := scheduler.NewScheduler(bc, moexClient, aiClient, exec, repo, notifier, tradeGuard, cfg, log)
-	webServer := web.NewServer(bc, repo, cfg, log)
+
+	// Dividend fetcher (optional)
+	var divFetcher *dividends.Fetcher
+	if cfg.Dividends.Enabled {
+		divFetcher = dividends.NewFetcher(
+			time.Duration(cfg.Dividends.CacheTTLHours)*time.Hour,
+			log,
+		)
+	}
+
+	// Trade journal (optional)
+	var j *journal.Journal
+	if cfg.Journal.Enabled {
+		j = journal.New(repo, log)
+		exec.SetJournal(j)
+	}
+
+	sched := scheduler.NewScheduler(bc, moexClient, aiClient, exec, repo, notifier, tradeGuard, cfg, log, divFetcher, j)
+	webServer := web.NewServer(bc, repo, cfg, log, moexClient)
 
 	// Start scheduler in goroutine
 	go sched.Run(ctx)

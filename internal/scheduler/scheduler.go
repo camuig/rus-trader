@@ -4,15 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sync"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/camuig/rus-trader/internal/ai"
 	"github.com/camuig/rus-trader/internal/broker"
 	"github.com/camuig/rus-trader/internal/config"
+	"github.com/camuig/rus-trader/internal/dividends"
 	"github.com/camuig/rus-trader/internal/executor"
+	"github.com/camuig/rus-trader/internal/features"
 	"github.com/camuig/rus-trader/internal/guard"
 	"github.com/camuig/rus-trader/internal/indicators"
+	"github.com/camuig/rus-trader/internal/journal"
 	"github.com/camuig/rus-trader/internal/logger"
 	"github.com/camuig/rus-trader/internal/moex"
 	"github.com/camuig/rus-trader/internal/screener"
@@ -21,16 +25,18 @@ import (
 )
 
 type Scheduler struct {
-	broker   *broker.BrokerClient
-	moex     *moex.Client
-	ai       *ai.DeepSeekClient
-	executor *executor.Executor
-	repo     *storage.Repository
-	notifier *telegram.Notifier
-	guard    *guard.TradeGuard
-	config   *config.Config
-	logger   *logger.Logger
-	loc      *time.Location
+	broker     *broker.BrokerClient
+	moex       *moex.Client
+	ai         *ai.DeepSeekClient
+	executor   *executor.Executor
+	repo       *storage.Repository
+	notifier   *telegram.Notifier
+	guard      *guard.TradeGuard
+	config     *config.Config
+	logger     *logger.Logger
+	loc        *time.Location
+	divFetcher *dividends.Fetcher
+	journal    *journal.Journal
 }
 
 func NewScheduler(
@@ -43,18 +49,22 @@ func NewScheduler(
 	g *guard.TradeGuard,
 	cfg *config.Config,
 	log *logger.Logger,
+	divFetcher *dividends.Fetcher,
+	j *journal.Journal,
 ) *Scheduler {
 	return &Scheduler{
-		broker:   bc,
-		moex:     moexClient,
-		ai:       aiClient,
-		executor: exec,
-		repo:     repo,
-		notifier: notifier,
-		guard:    g,
-		config:   cfg,
-		logger:   log,
-		loc:      cfg.MOEXLocation(),
+		broker:     bc,
+		moex:       moexClient,
+		ai:         aiClient,
+		executor:   exec,
+		repo:       repo,
+		notifier:   notifier,
+		guard:      g,
+		config:     cfg,
+		logger:     log,
+		loc:        cfg.MOEXLocation(),
+		divFetcher: divFetcher,
+		journal:    j,
 	}
 }
 
@@ -167,6 +177,9 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 		return false
 	}
 
+	// 3a. Reconcile: close DB trades that no longer exist at broker (stale orphans).
+	s.reconcileOrphanTrades(portfolio)
+
 	// 4. Ensure tickers with open positions are always included (even beyond limit)
 	for _, pos := range portfolio.Positions {
 		if pos.Ticker != "" && !tradableSet[pos.Ticker] {
@@ -191,20 +204,36 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 	for _, pos := range portfolio.Positions {
 		positionTickers[pos.Ticker] = true
 	}
-	snapshots := screener.Screen(allSnapshots, positionTickers, s.config.Trading.MaxAnalysisTickers)
+	snapshots := screener.Screen(allSnapshots, positionTickers, s.config.Trading.MaxAnalysisTickers, s.config.Trading.MinScreenerScore)
 	s.logger.Info("screened tickers", "before", len(allSnapshots), "after", len(snapshots))
 
-	// 6. Fetch ticker briefs (cached, non-fatal)
-	tickerBriefs := s.fetchTickerBriefs(tradableTickers)
-
-	// 6. Fetch news and filter by tickers
-	allNews, err := s.moex.FetchRecentNews(ctx)
-	if err != nil {
-		s.logger.Error("fetch news", "error", err)
-		// non-fatal, continue without news
-		allNews = nil
+	// Log indicators for all screened tickers
+	scores := screener.Scores(allSnapshots)
+	for _, sc := range scores {
+		for _, snap := range allSnapshots {
+			if snap.Ticker == sc.Ticker {
+				ind := snap.Indicators
+				s.logger.Debug("ticker indicators",
+					"ticker", sc.Ticker, "score", sc.Points,
+					"rsi", fmt.Sprintf("%.1f", ind.RSI14),
+					"ema9", fmt.Sprintf("%.2f", ind.EMA9),
+					"ema21", fmt.Sprintf("%.2f", ind.EMA21),
+					"atr", fmt.Sprintf("%.2f", ind.ATR14),
+					"relVol", fmt.Sprintf("%.1f", ind.RelVolume),
+					"price", fmt.Sprintf("%.2f", snap.LastPrice))
+				break
+			}
+		}
 	}
-	tickerNews := moex.FilterNewsForTickers(allNews, tradableTickers)
+
+	// 6. Fetch Finam company news (non-fatal)
+	finamNews, err := s.moex.FetchFinamNews(ctx, 30)
+	if err != nil {
+		s.logger.Error("fetch finam news", "error", err)
+		finamNews = nil
+	}
+	tickerNews := moex.FilterNewsForTickers(finamNews, tradableTickers)
+	s.logger.Info("finam news fetched", "total", len(finamNews), "matched_tickers", len(tickerNews))
 
 	// 7. Fetch world news (non-fatal)
 	worldCtx, cancelWorld := context.WithTimeout(ctx, 8*time.Second)
@@ -214,7 +243,11 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 		s.logger.Error("fetch world news", "error", err)
 		worldNewsItems = nil
 	}
-	globalNews := make([]string, 0, len(worldNewsItems))
+	globalNews := make([]string, 0, len(worldNewsItems)+len(finamNews))
+	// Add Finam news to global context
+	for _, n := range finamNews {
+		globalNews = append(globalNews, fmt.Sprintf("Финам: %s", n.Title))
+	}
 	for _, n := range worldNewsItems {
 		if n.Source != "" {
 			globalNews = append(globalNews, fmt.Sprintf("%s: %s", n.Source, n.Title))
@@ -222,52 +255,9 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 			globalNews = append(globalNews, n.Title)
 		}
 	}
-	s.logger.Info("world news fetched", "count", len(globalNews))
+	s.logger.Info("news fetched", "finam", len(finamNews), "world", len(worldNewsItems))
 
-	// 8. Build TickerAnalysis with OHLCV data, indicators, and news
-	tickerAnalyses := make([]ai.TickerAnalysis, 0, len(snapshots))
-	for _, snap := range snapshots {
-		ta := ai.TickerAnalysis{
-			Ticker:     snap.Ticker,
-			Brief:      tickerBriefs[snap.Ticker],
-			LastPrice:  snap.LastPrice,
-			Period3h:   toPeriodData(snap.Period3h),
-			Period1d:   toPeriodData(snap.Period1d),
-			Period3d:   toPeriodData(snap.Period3d),
-			Period1w:   toPeriodData(snap.Period1w),
-			Indicators: snap.Indicators,
-		}
-
-		if items, ok := tickerNews[snap.Ticker]; ok {
-			for _, n := range items {
-				ta.News = append(ta.News, n.Title)
-			}
-		}
-
-		tickerAnalyses = append(tickerAnalyses, ta)
-	}
-
-	// 9. Fetch recent closed trades for AI context
-	var recentTrades []ai.RecentClosedTrade
-	if closedTrades, err := s.repo.GetClosedTradesLast24h(); err == nil {
-		for _, t := range closedTrades {
-			entryPrice := t.Price // exit price from SELL record
-			if t.Quantity > 0 {
-				entryPrice = t.Price - t.PnL/float64(t.Quantity)
-			}
-			recentTrades = append(recentTrades, ai.RecentClosedTrade{
-				Ticker:     t.Ticker,
-				EntryPrice: entryPrice,
-				ExitPrice:  t.Price,
-				Quantity:   t.Quantity,
-				PnL:        t.PnL,
-				ClosedAt:   t.CreatedAt,
-				Reasoning:  t.Reasoning,
-			})
-		}
-	}
-
-	// 10. Fetch open trade context for AI (including SL/TP plan)
+	// 8. Fetch open trade context for AI (including SL/TP plan)
 	openContext := make(map[string]ai.OpenTradeContext)
 	if openTrades, err := s.repo.GetOpenTrades(); err == nil {
 		for _, t := range openTrades {
@@ -280,37 +270,195 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 		}
 	}
 
-	// 11. Fetch today's traded tickers for anti-churning
+	// 9. Fetch today's traded tickers for anti-churning
 	todayTraded, _ := s.repo.GetTodayTradedTickers()
 
-	// 11a. Fetch performance stats for AI context
+	// 10. Fetch performance stats for AI context
 	stats := s.fetchPerformanceStats()
 
-	// 12. AI analysis
-	analysisReq := &ai.AnalysisRequest{
-		Tickers:      tickerAnalyses,
-		GlobalNews:   globalNews,
-		Positions:    portfolio.Positions,
-		RecentTrades: recentTrades,
-		OpenContext:  openContext,
-		AvailableRub: portfolio.AvailableRub,
-		TotalRub:     portfolio.TotalRub,
-		Stats:        stats,
-		CurrentTime:  time.Now().In(s.loc),
+	// 11. Market regime context derived from all snapshots (no extra API calls).
+	marketCtx := computeMarketContext(allSnapshots)
+	s.logger.Info("market context",
+		"regime", marketCtx.Regime,
+		"chg_1d", fmt.Sprintf("%+.2f%%", marketCtx.ChangePct1d),
+		"chg_3d", fmt.Sprintf("%+.2f%%", marketCtx.ChangePct3d),
+		"chg_1w", fmt.Sprintf("%+.2f%%", marketCtx.ChangePct1w))
+
+	// 12. Daily journal review (first cycle of the day)
+	s.runDailyReview(ctx)
+
+	// 13. Load journal lessons
+	var lessonLines []string
+	if s.journal != nil && s.config.Journal.Enabled {
+		lessons, err := s.journal.LoadLessons(s.config.Journal.MaxLessonAgeDays, s.config.Journal.MaxLessonsInPrompt)
+		if err != nil {
+			s.logger.Error("load journal lessons", "error", err)
+		}
+		for _, l := range lessons {
+			lessonLines = append(lessonLines, fmt.Sprintf("[%s] %s: %s → %s", l.Confidence, l.Pattern, l.Observation, l.Recommendation))
+		}
+		if len(lessonLines) > 0 {
+			s.logger.Info("journal lessons loaded", "count", len(lessonLines))
+		}
 	}
 
-	decisions, rawResponse, err := s.ai.Analyze(ctx, analysisReq, todayTraded)
-	if err != nil {
-		s.logger.Error("AI analysis", "error", err)
-		s.saveAnalysisLog(len(tradableTickers), rawResponse, "", err)
-		return false
+	// 14. Fetch dividends (if enabled)
+	var divMap map[string]dividends.DividendInfo
+	if s.divFetcher != nil && s.config.Dividends.Enabled {
+		allDivs, err := s.divFetcher.Fetch(ctx)
+		if err != nil {
+			s.logger.Error("fetch dividends", "error", err)
+		} else {
+			divMap = dividends.FilterByLookahead(allDivs, s.config.Dividends.LookaheadDays)
+			s.logger.Info("dividends fetched", "total", len(allDivs), "relevant", len(divMap))
+		}
 	}
 
-	s.logger.Info("AI decisions received", "count", len(decisions))
+	// 15. Build textual features for each screened snapshot
+	featuresMap := make(map[string]string, len(snapshots))
+	var tickerFeaturesList []string
+	for _, snap := range snapshots {
+		var divPtr *dividends.DividendInfo
+		if d, ok := divMap[snap.Ticker]; ok {
+			divPtr = &d
+		}
+		tf := features.BuildTickerFeatures(snap, divPtr)
+		featuresMap[tf.Ticker] = tf.Summary
+		tickerFeaturesList = append(tickerFeaturesList, tf.Summary)
+	}
+	s.executor.SetFeatures(featuresMap)
+
+	// 16. Build ticker news map (map[string][]string)
+	tickerNewsMap := make(map[string][]string)
+	for ticker, items := range tickerNews {
+		for _, n := range items {
+			tickerNewsMap[ticker] = append(tickerNewsMap[ticker], n.Title)
+		}
+	}
+
+	// 17. Dual AI agents (screening + position manager) in parallel
+	var screeningDecisions, positionDecisions []ai.AIDecision
+	var screeningRaw, positionRaw string
+
+	g, gctx := errgroup.WithContext(ctx)
+
+	// Screening Agent: find BUY candidates
+	g.Go(func() error {
+		screeningReq := &ai.ScreeningRequest{
+			TickerFeatures: tickerFeaturesList,
+			Market:         marketCtx,
+			GlobalNews:     globalNews,
+			TickerNews:     tickerNewsMap,
+			Lessons:        lessonLines,
+			TodayTraded:    todayTraded,
+			Stats:          stats,
+			CurrentTime:    time.Now().In(s.loc),
+			AvailableRub:   portfolio.AvailableRub,
+		}
+		decs, raw, err := s.ai.ScreeningAnalyze(gctx, screeningReq)
+		if err != nil {
+			s.logger.Error("screening agent failed", "error", err)
+			screeningRaw = raw
+			return nil // don't fail the group
+		}
+		screeningDecisions = decs
+		screeningRaw = raw
+		s.logger.Info("screening agent done", "decisions", len(decs))
+		return nil
+	})
+
+	// Position Manager: manage open positions (only if positions exist)
+	if len(portfolio.Positions) > 0 {
+		g.Go(func() error {
+			var posContexts []ai.PositionContext
+			for _, pos := range portfolio.Positions {
+				pctChange := 0.0
+				if pos.AvgPrice > 0 {
+					pctChange = (pos.CurrentPrice - pos.AvgPrice) / pos.AvgPrice * 100
+				}
+				pc := ai.PositionContext{
+					Ticker:       pos.Ticker,
+					EntryPrice:   pos.AvgPrice,
+					CurrentPrice: pos.CurrentPrice,
+					PnLPct:       pctChange,
+					Quantity:     int64(pos.Quantity),
+					Features:     featuresMap[pos.Ticker],
+				}
+				if tc, ok := openContext[pos.Ticker]; ok {
+					pc.StopLoss = tc.StopLossPrice
+					pc.TakeProfit = tc.TakeProfitPrice
+					pc.Hypothesis = tc.Reasoning
+					pc.HoldDuration = formatDurationSince(tc.OpenedAt)
+					if tc.TakeProfitPrice > 0 && pos.AvgPrice > 0 && tc.TakeProfitPrice != pos.AvgPrice {
+						pc.ProgressToTP = (pos.CurrentPrice - pos.AvgPrice) / (tc.TakeProfitPrice - pos.AvgPrice) * 100
+					}
+				}
+				if items, ok := tickerNewsMap[pos.Ticker]; ok {
+					pc.News = items
+				}
+				posContexts = append(posContexts, pc)
+			}
+
+			posReq := &ai.PositionRequest{
+				Positions:   posContexts,
+				Lessons:     lessonLines,
+				CurrentTime: time.Now().In(s.loc),
+				Market:      marketCtx,
+			}
+			decs, raw, err := s.ai.PositionAnalyze(gctx, posReq)
+			if err != nil {
+				s.logger.Error("position manager failed", "error", err)
+				positionRaw = raw
+				return nil // don't fail the group
+			}
+			positionDecisions = decs
+			positionRaw = raw
+			s.logger.Info("position manager done", "decisions", len(decs))
+			return nil
+		})
+	}
+
+	_ = g.Wait()
+
+	// Merge decisions: position manager first, then screening
+	decisions := append(positionDecisions, screeningDecisions...)
+	rawResponse := ""
+	if screeningRaw != "" && positionRaw != "" {
+		rawResponse = "=== SCREENING ===\n" + screeningRaw + "\n=== POSITION MANAGER ===\n" + positionRaw
+	} else if screeningRaw != "" {
+		rawResponse = screeningRaw
+	} else {
+		rawResponse = positionRaw
+	}
+
+	s.logger.Info("AI decisions received", "count", len(decisions),
+		"screening", len(screeningDecisions), "position", len(positionDecisions))
+
+	if len(decisions) == 0 {
+		s.logger.Info("AI returned no decisions — no trading signals found",
+			"tickers_screened", len(snapshots),
+			"available_rub", portfolio.AvailableRub,
+			"open_positions", len(portfolio.Positions))
+	}
+
+	// Log decisions breakdown
+	var buys, sells, holds int
 	for _, d := range decisions {
+		switch d.Action {
+		case "BUY":
+			buys++
+		case "SELL":
+			sells++
+		case "HOLD":
+			holds++
+		}
 		s.logger.Info("AI decision",
 			"action", d.Action, "ticker", d.Ticker,
 			"confidence", d.Confidence, "reasoning", d.Reasoning)
+	}
+	if len(decisions) > 0 {
+		s.logger.Info("decisions breakdown",
+			"buy", buys, "sell", sells, "hold", holds)
 	}
 
 	// 13. Set indicators in guard for pre-validation and apply filter
@@ -319,8 +467,12 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 		indicatorsMap[snap.Ticker] = snap.Indicators
 	}
 	s.guard.SetIndicators(indicatorsMap)
+	s.executor.SetIndicators(indicatorsMap)
 	allowed, blocked := s.guard.Filter(decisions)
 	for _, b := range blocked {
+		s.logger.Info("decision BLOCKED by guard",
+			"ticker", b.Decision.Ticker, "action", b.Decision.Action,
+			"reason", b.Reason, "confidence", b.Decision.Confidence)
 		s.notifier.NotifyBlocked(b.Decision.Ticker, b.Decision.Action, b.Reason)
 	}
 
@@ -330,6 +482,10 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 	}
 	s.logger.Info("guard filter applied",
 		"allowed", len(allowedDecisions), "blocked", len(blocked))
+
+	if len(allowedDecisions) == 0 && len(decisions) > 0 {
+		s.logger.Info("all decisions were blocked or HOLD — no trades will be executed")
+	}
 
 	// 13a. Update trailing stops for open positions
 	if s.config.Trading.TrailingStopEnabled {
@@ -347,19 +503,78 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 	return true
 }
 
-func toPeriodData(p broker.PeriodOHLCV) ai.PeriodData {
-	var changePct float64
-	if p.Open > 0 {
-		changePct = (p.Close - p.Open) / p.Open * 100
+func safeDiv(a, b float64) float64 {
+	if b == 0 {
+		return 0
 	}
-	return ai.PeriodData{
-		Open:      p.Open,
-		High:      p.High,
-		Low:       p.Low,
-		Close:     p.Close,
-		Volume:    p.Volume,
-		ChangePct: changePct,
+	return a / b
+}
+
+func formatDurationSince(t time.Time) string {
+	d := time.Since(t)
+	hours := int(d.Hours())
+	if hours >= 24 {
+		return fmt.Sprintf("%dд %dч", hours/24, hours%24)
 	}
+	return fmt.Sprintf("%dч %dм", hours, int(d.Minutes())%60)
+}
+
+// computeMarketContext derives broad market regime from the candle snapshots we already have.
+// Uses averages across snapshots + share of uptrending tickers as a proxy for IMOEX.
+func computeMarketContext(snapshots []broker.CandleSnapshot) ai.MarketContext {
+	ctx := ai.MarketContext{IndexTicker: "MOEX (avg)", Regime: "unknown"}
+	if len(snapshots) == 0 {
+		return ctx
+	}
+
+	var sum1d, sum3d, sum1w float64
+	var cnt1d, cnt3d, cnt1w int
+	var uptrend, total int
+
+	for _, snap := range snapshots {
+		if snap.Period1d.Open > 0 {
+			sum1d += (snap.Period1d.Close - snap.Period1d.Open) / snap.Period1d.Open * 100
+			cnt1d++
+		}
+		if snap.Period3d.Open > 0 {
+			sum3d += (snap.Period3d.Close - snap.Period3d.Open) / snap.Period3d.Open * 100
+			cnt3d++
+		}
+		if snap.Period1w.Open > 0 {
+			sum1w += (snap.Period1w.Close - snap.Period1w.Open) / snap.Period1w.Open * 100
+			cnt1w++
+		}
+		total++
+		if snap.Indicators.EMA9 > 0 && snap.Indicators.EMA21 > 0 && snap.Indicators.EMA9 > snap.Indicators.EMA21 {
+			uptrend++
+		}
+	}
+
+	if cnt1d > 0 {
+		ctx.ChangePct1d = sum1d / float64(cnt1d)
+	}
+	if cnt3d > 0 {
+		ctx.ChangePct3d = sum3d / float64(cnt3d)
+	}
+	if cnt1w > 0 {
+		ctx.ChangePct1w = sum1w / float64(cnt1w)
+	}
+
+	if total == 0 {
+		return ctx
+	}
+	uptrendShare := float64(uptrend) / float64(total)
+	switch {
+	case uptrendShare >= 0.6 && ctx.ChangePct3d > 0.5:
+		ctx.Regime = "uptrend"
+	case uptrendShare <= 0.3 && ctx.ChangePct3d < -0.5:
+		ctx.Regime = "downtrend"
+	case ctx.ChangePct1w > -1.5 && ctx.ChangePct1w < 1.5:
+		ctx.Regime = "range"
+	default:
+		ctx.Regime = "mixed"
+	}
+	return ctx
 }
 
 func (s *Scheduler) isWithinTradingHours() bool {
@@ -377,6 +592,42 @@ func (s *Scheduler) isWithinTradingHours() bool {
 
 	// MOEX main session: 10:00 - 18:50 MSK
 	return totalMinutes >= 600 && totalMinutes <= 1130
+}
+
+// reconcileOrphanTrades closes trades that are "open" in DB but whose ticker is
+// absent from the broker's real portfolio. This handles cases where a stop order
+// was executed at the broker level but the bot missed the update (e.g. inverted SL,
+// app restart, network issue).
+func (s *Scheduler) reconcileOrphanTrades(portfolio *broker.PortfolioInfo) {
+	openTrades, err := s.repo.GetOpenTrades()
+	if err != nil || len(openTrades) == 0 {
+		return
+	}
+
+	// Build set of tickers that actually exist at broker
+	brokerTickers := make(map[string]float64, len(portfolio.Positions))
+	for _, pos := range portfolio.Positions {
+		if pos.Ticker != "" && pos.Quantity > 0 {
+			brokerTickers[pos.Ticker] = pos.CurrentPrice
+		}
+	}
+
+	for _, t := range openTrades {
+		if _, exists := brokerTickers[t.Ticker]; exists {
+			continue
+		}
+		// Trade is "open" in DB but not at broker — close it.
+		// We can't know the exact exit price, set PnL=0 and log.
+		s.logger.Info("reconcile: closing stale orphan trade (not in broker portfolio)",
+			"ticker", t.Ticker, "trade_id", t.ID, "opened", t.CreatedAt.Format("02.01 15:04"))
+		t.Status = "closed"
+		t.PnL = 0
+		t.Reasoning = "auto-reconcile: позиция не найдена у брокера"
+		if err := s.repo.UpdateTrade(&t); err != nil {
+			s.logger.Error("reconcile: update trade", "error", err)
+		}
+		s.notifier.NotifyError("orphan reconcile: "+t.Ticker, fmt.Errorf("закрыта stale позиция (вход %.2f, %d шт, открыта %s)", t.Price, t.Quantity, t.CreatedAt.Format("02.01 15:04")))
+	}
 }
 
 func (s *Scheduler) saveAnalysisLog(tickersCount int, rawResponse, decisionsJSON string, err error) {
@@ -490,6 +741,12 @@ func (s *Scheduler) fetchPerformanceStats() ai.PerformanceStats {
 		s.logger.Error("fetch performance stats", "error", err)
 		return ai.PerformanceStats{}
 	}
+
+	losingStreak, err := s.repo.GetLosingStreak()
+	if err != nil {
+		s.logger.Error("fetch losing streak", "error", err)
+	}
+
 	return ai.PerformanceStats{
 		WinRate7d:    stats.WinRate,
 		AvgProfit:    stats.AvgProfit,
@@ -497,43 +754,128 @@ func (s *Scheduler) fetchPerformanceStats() ai.PerformanceStats {
 		TotalPnL7d:   stats.TotalPnL,
 		TradeCount7d: stats.TradeCount,
 		WorstTickers: stats.WorstTickers,
+		LosingStreak: losingStreak,
 	}
 }
 
-func (s *Scheduler) fetchTickerBriefs(tickers []string) map[string]string {
-	if len(tickers) == 0 {
-		return nil
+func (s *Scheduler) runDailyReview(ctx context.Context) {
+	if s.journal == nil || !s.config.Journal.Enabled {
+		return
+	}
+	if !s.journal.NeedsDailyReview(s.loc) {
+		return
 	}
 
-	result := make(map[string]string, len(tickers))
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, 5)
-
-	for _, ticker := range tickers {
-		t := ticker
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
-			brief, err := s.broker.GetTickerBrief(t)
-			if err != nil {
-				s.logger.Debug("fetch ticker brief failed", "ticker", t, "error", err)
-				return
-			}
-			if brief == "" {
-				return
-			}
-
-			mu.Lock()
-			result[t] = brief
-			mu.Unlock()
-		}()
+	outcomes, err := s.journal.GetPendingOutcomes()
+	if err != nil {
+		s.logger.Error("daily review: get outcomes", "error", err)
+		return
+	}
+	if len(outcomes) < s.config.Journal.MinTradesForReview {
+		s.logger.Info("daily review: not enough trades", "count", len(outcomes), "min", s.config.Journal.MinTradesForReview)
+		return
 	}
 
-	wg.Wait()
-	s.logger.Info("ticker briefs fetched", "count", len(result))
-	return result
+	s.logger.Info("running daily journal review", "outcomes", len(outcomes))
+
+	// Build stats
+	var wins, losses int
+	var winPnL, lossPnL, winHours, lossHours float64
+	exitReasons := make(map[string]int)
+	var journalOutcomes []ai.JournalOutcome
+
+	for _, o := range outcomes {
+		journalOutcomes = append(journalOutcomes, ai.JournalOutcome{
+			Hypothesis:    o.Hypothesis,
+			EntryFeatures: o.EntryFeatures,
+			ExitReason:    o.ExitReason,
+			Outcome:       o.Outcome,
+			PnL:           o.PnL,
+			HoldHours:     o.HoldDurationHours,
+			WhatHappened:  o.WhatHappened,
+		})
+		exitReasons[o.ExitReason]++
+		if o.PnL > 0 {
+			wins++
+			winPnL += o.PnL
+			winHours += o.HoldDurationHours
+		} else if o.PnL < 0 {
+			losses++
+			lossPnL += o.PnL
+			lossHours += o.HoldDurationHours
+		}
+	}
+
+	total := wins + losses
+	winRate := 0.0
+	if total > 0 {
+		winRate = float64(wins) / float64(total) * 100
+	}
+
+	// Load previous lessons for continuity
+	prevLessons, _ := s.journal.LoadLessons(s.config.Journal.MaxLessonAgeDays, s.config.Journal.MaxLessonsInPrompt)
+	var prevLessonLines []string
+	for _, l := range prevLessons {
+		prevLessonLines = append(prevLessonLines, fmt.Sprintf("[%s] %s: %s → %s", l.Confidence, l.Pattern, l.Observation, l.Recommendation))
+	}
+
+	reviewReq := &ai.JournalReviewRequest{
+		Outcomes: journalOutcomes,
+		Stats: ai.JournalReviewStats{
+			TotalTrades:      total,
+			WinRate:          winRate,
+			AvgWinPnL:        safeDiv(winPnL, float64(wins)),
+			AvgLossPnL:       safeDiv(lossPnL, float64(losses)),
+			AvgHoldHoursWin:  safeDiv(winHours, float64(wins)),
+			AvgHoldHoursLoss: safeDiv(lossHours, float64(losses)),
+			ByExitReason:     exitReasons,
+		},
+		PreviousLessons: prevLessonLines,
+		CurrentDate:     time.Now().In(s.loc),
+	}
+
+	rawLessons, rawResponse, err := s.ai.JournalReview(ctx, reviewReq)
+	if err != nil {
+		s.logger.Error("daily review: LLM call", "error", err)
+		return
+	}
+
+	// Convert raw lessons to journal.Lesson
+	var lessons []journal.Lesson
+	for _, raw := range rawLessons {
+		l := journal.Lesson{}
+		if v, ok := raw["pattern"].(string); ok {
+			l.Pattern = v
+		}
+		if v, ok := raw["observation"].(string); ok {
+			l.Observation = v
+		}
+		if v, ok := raw["recommendation"].(string); ok {
+			l.Recommendation = v
+		}
+		if v, ok := raw["confidence"].(string); ok {
+			l.Confidence = v
+		}
+		if arr, ok := raw["tickers"].([]interface{}); ok {
+			for _, t := range arr {
+				if str, ok := t.(string); ok {
+					l.Tickers = append(l.Tickers, str)
+				}
+			}
+		}
+		if l.Pattern != "" {
+			lessons = append(lessons, l)
+		}
+	}
+
+	prevDay := journal.PreviousTradingDay(time.Now().In(s.loc))
+	if err := s.journal.SaveReview(prevDay.Format("2006-01-02"), lessons, rawResponse, len(outcomes)); err != nil {
+		s.logger.Error("daily review: save", "error", err)
+		return
+	}
+
+	s.logger.Info("daily review complete", "lessons", len(lessons), "trades_reviewed", len(outcomes))
+	for _, l := range lessons {
+		s.logger.Info("lesson", "confidence", l.Confidence, "pattern", l.Pattern, "recommendation", l.Recommendation)
+	}
 }
