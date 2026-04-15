@@ -2,7 +2,6 @@ package scheduler
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -663,68 +662,7 @@ func (s *Scheduler) findSimilarPatterns(ctx context.Context, features map[string
 }
 
 
-// reconcileOrphanTrades closes trades that are "open" in DB but whose ticker is
-// absent from the broker's real portfolio. This handles cases where a stop order
-// was executed at the broker level but the bot missed the update (e.g. inverted SL,
-// app restart, network issue).
-func (s *Scheduler) reconcileOrphanTrades(portfolio *broker.PortfolioInfo) {
-	openTrades, err := s.repo.GetOpenTrades()
-	if err != nil || len(openTrades) == 0 {
-		return
-	}
 
-	// Build set of tickers that actually exist at broker
-	brokerTickers := make(map[string]float64, len(portfolio.Positions))
-	for _, pos := range portfolio.Positions {
-		if pos.Ticker != "" && pos.Quantity > 0 {
-			brokerTickers[pos.Ticker] = pos.CurrentPrice
-		}
-	}
-
-	for _, t := range openTrades {
-		if _, exists := brokerTickers[t.Ticker]; exists {
-			continue
-		}
-		// Trade is "open" in DB but not at broker — close it.
-		// We can't know the exact exit price, set PnL=0 and log.
-		s.logger.Info("reconcile: closing stale orphan trade (not in broker portfolio)",
-			"ticker", t.Ticker, "trade_id", t.ID, "opened", t.CreatedAt.Format("02.01 15:04"))
-		t.Status = "closed"
-		t.PnL = 0
-		t.Reasoning = "auto-reconcile: позиция не найдена у брокера"
-		if err := s.repo.UpdateTrade(&t); err != nil {
-			s.logger.Error("reconcile: update trade", "error", err)
-		}
-		s.notifier.NotifyError("orphan reconcile: "+t.Ticker, fmt.Errorf("закрыта stale позиция (вход %.2f, %d шт, открыта %s)", t.Price, t.Quantity, t.CreatedAt.Format("02.01 15:04")))
-	}
-}
-
-func (s *Scheduler) saveAnalysisLog(tickersCount int, rawResponse, decisionsJSON string, err error) {
-	log := &storage.AnalysisLog{
-		SignalsCount:  tickersCount,
-		AIResponse:    rawResponse,
-		DecisionsJSON: decisionsJSON,
-	}
-	if err != nil {
-		log.Error = err.Error()
-	}
-	if dbErr := s.repo.SaveAnalysisLog(log); dbErr != nil {
-		s.logger.Error("save analysis log", "error", dbErr)
-	}
-}
-
-func (s *Scheduler) savePortfolioSnapshot(portfolio *broker.PortfolioInfo) {
-	positionsJSON, _ := json.Marshal(portfolio.Positions)
-	snapshot := &storage.PortfolioSnapshot{
-		TotalRub:       portfolio.TotalRub,
-		AvailableRub:   portfolio.AvailableRub,
-		PositionsCount: len(portfolio.Positions),
-		PositionsJSON:  string(positionsJSON),
-	}
-	if err := s.repo.SavePortfolioSnapshot(snapshot); err != nil {
-		s.logger.Error("save portfolio snapshot", "error", err)
-	}
-}
 
 func (s *Scheduler) updateTrailingStops(portfolio *broker.PortfolioInfo) {
 	openTrades, err := s.repo.GetOpenTrades()
