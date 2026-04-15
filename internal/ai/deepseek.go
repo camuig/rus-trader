@@ -130,6 +130,11 @@ func (d *DeepSeekClient) callLLM(ctx context.Context, sysPrompt, userPrompt, mod
 	return content.String(), nil
 }
 
+// CallLLM is the public wrapper of callLLM for use by other packages.
+func (d *DeepSeekClient) CallLLM(ctx context.Context, sysPrompt, userPrompt, model string, timeoutSec int) (string, error) {
+	return d.callLLM(ctx, sysPrompt, userPrompt, model, timeoutSec)
+}
+
 // ScreeningAnalyze calls DeepSeek for BUY candidate screening.
 func (d *DeepSeekClient) ScreeningAnalyze(ctx context.Context, req *ScreeningRequest) ([]AIDecision, string, error) {
 	userPrompt := BuildScreeningPrompt(req, d.cfg.AIAgents.Screening.MaxChars)
