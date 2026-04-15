@@ -7,17 +7,37 @@ import (
 	"github.com/camuig/rus-trader/internal/ai"
 	"github.com/camuig/rus-trader/internal/broker"
 	"github.com/camuig/rus-trader/internal/config"
+	"github.com/camuig/rus-trader/internal/indicators"
+	"github.com/camuig/rus-trader/internal/journal"
 	"github.com/camuig/rus-trader/internal/logger"
 	"github.com/camuig/rus-trader/internal/storage"
 	"github.com/camuig/rus-trader/internal/telegram"
 )
 
 type Executor struct {
-	broker   *broker.BrokerClient
-	repo     *storage.Repository
-	notifier *telegram.Notifier
-	config   *config.Config
-	logger   *logger.Logger
+	broker     *broker.BrokerClient
+	repo       *storage.Repository
+	notifier   *telegram.Notifier
+	config     *config.Config
+	logger     *logger.Logger
+	indicators map[string]indicators.Indicators
+	journal    *journal.Journal
+	features   map[string]string // ticker → current textual features
+}
+
+// SetIndicators passes current indicators map to executor for ATR-based SL sizing.
+func (e *Executor) SetIndicators(m map[string]indicators.Indicators) {
+	e.indicators = m
+}
+
+// SetJournal sets the journal for recording trade outcomes.
+func (e *Executor) SetJournal(j *journal.Journal) {
+	e.journal = j
+}
+
+// SetFeatures sets current textual features for saving on BUY.
+func (e *Executor) SetFeatures(f map[string]string) {
+	e.features = f
 }
 
 func NewExecutor(
@@ -109,6 +129,10 @@ func (e *Executor) executeBuy(d ai.AIDecision) {
 	// Check spread before buying
 	spreadPct := e.broker.GetSpreadPct(instrumentUID)
 	maxSpread := e.config.Trading.MaxSpreadPct
+	if spreadPct > 0 {
+		e.logger.Info("BUY spread check", "ticker", d.Ticker,
+			"spread", fmt.Sprintf("%.3f%%", spreadPct), "max", fmt.Sprintf("%.3f%%", maxSpread))
+	}
 	if maxSpread > 0 && spreadPct > maxSpread {
 		e.logger.Info("BUY skipped: spread too wide",
 			"ticker", d.Ticker, "spread", spreadPct, "max", maxSpread)
@@ -117,7 +141,8 @@ func (e *Executor) executeBuy(d ai.AIDecision) {
 
 	lots := e.broker.CalculateLots(instrumentUID, lastPrice, maxPosition)
 	if lots < 1 {
-		e.logger.Info("BUY skipped: insufficient balance for 1 lot", "ticker", d.Ticker)
+		e.logger.Info("BUY skipped: insufficient balance for 1 lot",
+			"ticker", d.Ticker, "price", lastPrice, "maxPosition", maxPosition)
 		return
 	}
 
@@ -136,16 +161,83 @@ func (e *Executor) executeBuy(d ai.AIDecision) {
 		return
 	}
 
+	if result.ExecutedLots <= 0 || result.ExecutedPrice <= 0 {
+		e.logger.Error("BUY order returned zero lots/price, not saving",
+			"ticker", d.Ticker, "lots", result.ExecutedLots, "price", result.ExecutedPrice)
+		return
+	}
+
 	executedPrice := result.ExecutedPrice
 
-	// Calculate SL/TP prices
+	// Calculate SL/TP prices with validation
 	slPrice := d.StopLoss
 	tpPrice := d.TakeProfit
-	if slPrice <= 0 {
-		slPrice = executedPrice * (1 - e.config.Trading.DefaultStopLossPct/100)
+
+	cfg := e.config.Trading
+
+	// Dynamic SL floor based on ATR: widen SL on volatile tickers so market noise
+	// doesn't knock us out. Fall back to static min_stop_loss_pct otherwise.
+	slFloorPct := cfg.MinStopLossPct
+	if ind, ok := e.indicators[d.Ticker]; ok && ind.ATR14 > 0 && executedPrice > 0 && cfg.ATRStopLossMultiplier > 0 {
+		atrPct := ind.ATR14 / executedPrice * 100
+		dynamicFloor := cfg.ATRStopLossMultiplier * atrPct
+		if dynamicFloor > slFloorPct {
+			slFloorPct = dynamicFloor
+		}
 	}
-	if tpPrice <= 0 {
-		tpPrice = executedPrice * (1 + e.config.Trading.DefaultTakeProfitPct/100)
+	// Cap SL at a sane maximum so a single trade doesn't risk too much capital.
+	if slFloorPct > 6.0 {
+		slFloorPct = 6.0
+	}
+
+	defaultSL := executedPrice * (1 - cfg.DefaultStopLossPct/100)
+	defaultTP := executedPrice * (1 + cfg.DefaultTakeProfitPct/100)
+	minSL := executedPrice * (1 - slFloorPct/100)
+	minTP := executedPrice * (1 + cfg.MinTakeProfitPct/100)
+
+	// Fix inverted or missing SL (SL must be below entry)
+	if slPrice <= 0 || slPrice >= executedPrice {
+		e.logger.Info("SL corrected: invalid or inverted",
+			"ticker", d.Ticker, "original_sl", slPrice, "new_sl", defaultSL)
+		slPrice = defaultSL
+	}
+
+	// Enforce minimum SL distance
+	if slPrice > minSL {
+		e.logger.Info("SL corrected: too tight",
+			"ticker", d.Ticker, "original_sl", slPrice, "min_sl", minSL)
+		slPrice = minSL
+	}
+
+	// Fix missing TP
+	if tpPrice <= 0 || tpPrice <= executedPrice {
+		tpPrice = defaultTP
+	}
+
+	// Enforce minimum TP distance
+	if tpPrice < minTP {
+		e.logger.Info("TP corrected: too tight",
+			"ticker", d.Ticker, "original_tp", tpPrice, "min_tp", minTP)
+		tpPrice = minTP
+	}
+
+	// Enforce minimum risk/reward ratio
+	slDistance := executedPrice - slPrice
+	if slDistance > 0 && cfg.MinRiskRewardRatio > 0 {
+		requiredTP := executedPrice + slDistance*cfg.MinRiskRewardRatio
+		if tpPrice < requiredTP {
+			e.logger.Info("TP adjusted for R:R ratio",
+				"ticker", d.Ticker, "original_tp", tpPrice, "adjusted_tp", requiredTP,
+				"rr", cfg.MinRiskRewardRatio)
+			tpPrice = requiredTP
+		}
+	}
+
+	// Final safety: SL must be strictly below entry price
+	if slPrice >= executedPrice {
+		e.logger.Info("SL final safety: still above entry after corrections, forcing default",
+			"ticker", d.Ticker, "sl", slPrice, "entry", executedPrice, "new_sl", defaultSL)
+		slPrice = defaultSL
 	}
 
 	// Place stop orders
@@ -153,6 +245,10 @@ func (e *Executor) executeBuy(d ai.AIDecision) {
 	tpOrderID, _ := e.broker.PlaceTakeProfit(instrumentUID, result.ExecutedLots, tpPrice)
 
 	// Save trade to DB
+	entryFeatures := ""
+	if e.features != nil {
+		entryFeatures = e.features[d.Ticker]
+	}
 	trade := &storage.Trade{
 		Ticker:            d.Ticker,
 		Action:            "BUY",
@@ -164,6 +260,7 @@ func (e *Executor) executeBuy(d ai.AIDecision) {
 		StopLossOrderID:   slOrderID,
 		TakeProfitOrderID: tpOrderID,
 		Reasoning:         d.Reasoning,
+		EntryFeatures:     entryFeatures,
 		Status:            "open",
 	}
 	if err := e.repo.SaveTrade(trade); err != nil {
@@ -177,10 +274,22 @@ func (e *Executor) executeBuy(d ai.AIDecision) {
 }
 
 func (e *Executor) executeSell(d ai.AIDecision) {
-	// Find open trade
+	// Find open trade in DB
 	openTrade, err := e.repo.GetOpenTradeByTicker(d.Ticker)
 	if err != nil {
-		e.logger.Info("SELL skipped: no open position", "ticker", d.Ticker)
+		// No DB record — check if broker has this position (orphaned position)
+		e.sellOrphanedPosition(d)
+		return
+	}
+
+	if openTrade.Quantity <= 0 {
+		e.logger.Error("SELL skipped: open trade has zero quantity, closing record",
+			"ticker", d.Ticker)
+		openTrade.Status = "closed"
+		openTrade.PnL = 0
+		_ = e.repo.UpdateTrade(openTrade)
+		// Try to sell orphaned position at broker
+		e.sellOrphanedPosition(d)
 		return
 	}
 
@@ -210,6 +319,14 @@ func (e *Executor) executeSell(d ai.AIDecision) {
 		return
 	}
 
+	// Validate execution result — don't record a bogus PnL if broker returned zeros
+	if result.ExecutedPrice <= 0 || result.ExecutedLots <= 0 {
+		e.logger.Error("SELL order returned zero price/lots, not recording PnL",
+			"ticker", d.Ticker, "price", result.ExecutedPrice, "lots", result.ExecutedLots)
+		e.notifier.NotifyError("SELL "+d.Ticker, fmt.Errorf("broker returned price=%.2f lots=%d — ордер мог не исполниться", result.ExecutedPrice, result.ExecutedLots))
+		return
+	}
+
 	// Cancel stop orders
 	e.broker.CancelStopOrders(openTrade.StopLossOrderID, openTrade.TakeProfitOrderID)
 
@@ -224,6 +341,11 @@ func (e *Executor) executeSell(d ai.AIDecision) {
 	openTrade.Status = "closed"
 	if err := e.repo.UpdateTrade(openTrade); err != nil {
 		e.logger.Error("update trade", "error", err)
+	}
+
+	// Record trade outcome for journal
+	if e.journal != nil {
+		e.journal.RecordOutcome(openTrade, result.ExecutedPrice, pnl, d.Reasoning)
 	}
 
 	// Save sell trade record
@@ -246,6 +368,78 @@ func (e *Executor) executeSell(d ai.AIDecision) {
 		"ticker", d.Ticker, "price", result.ExecutedPrice, "lots", result.ExecutedLots, "pnl", pnl)
 }
 
+// sellOrphanedPosition sells a position that exists at the broker but not in DB.
+func (e *Executor) sellOrphanedPosition(d ai.AIDecision) {
+	portfolio, err := e.broker.GetPortfolio()
+	if err != nil {
+		e.logger.Info("SELL skipped: no open position in DB or broker", "ticker", d.Ticker)
+		return
+	}
+
+	var qty int64
+	for _, pos := range portfolio.Positions {
+		if pos.Ticker == d.Ticker && pos.Quantity > 0 {
+			qty = int64(pos.Quantity)
+			break
+		}
+	}
+	if qty <= 0 {
+		e.logger.Info("SELL skipped: no position at broker", "ticker", d.Ticker)
+		return
+	}
+
+	e.logger.Info("selling orphaned position (exists at broker, not in DB)",
+		"ticker", d.Ticker, "quantity", qty)
+
+	instrumentUID, err := e.broker.ResolveTickerToUID(d.Ticker)
+	if err != nil {
+		e.logger.Error("resolve ticker for orphan sell", "ticker", d.Ticker, "error", err)
+		return
+	}
+
+	var result *broker.OrderResult
+	slippage := e.config.Trading.LimitOrderSlippage
+	if slippage > 0 {
+		lastPrice := e.broker.GetLastPrice(instrumentUID)
+		if lastPrice > 0 {
+			limitPrice := lastPrice * (1 - slippage/100)
+			result, err = e.broker.SellWithPrice(instrumentUID, qty, limitPrice)
+		} else {
+			result, err = e.broker.Sell(instrumentUID, qty)
+		}
+	} else {
+		result, err = e.broker.Sell(instrumentUID, qty)
+	}
+	if err != nil {
+		e.logger.Error("orphan sell failed", "ticker", d.Ticker, "error", err)
+		return
+	}
+
+	if result.ExecutedPrice <= 0 || result.ExecutedLots <= 0 {
+		e.logger.Error("orphan sell returned zero price/lots",
+			"ticker", d.Ticker, "price", result.ExecutedPrice, "lots", result.ExecutedLots)
+		return
+	}
+
+	sellTrade := &storage.Trade{
+		Ticker:    d.Ticker,
+		Action:    "SELL",
+		Price:     result.ExecutedPrice,
+		Quantity:  result.ExecutedLots,
+		OrderID:   result.OrderID,
+		PnL:       0,
+		Reasoning: "orphaned position cleanup: " + d.Reasoning,
+		Status:    "closed",
+	}
+	if err := e.repo.SaveTrade(sellTrade); err != nil {
+		e.logger.Error("save orphan sell trade", "error", err)
+	}
+
+	e.notifier.NotifySell(d.Ticker, result.ExecutedPrice, result.ExecutedLots, 0, "orphaned position cleanup")
+	e.logger.Info("orphaned position sold",
+		"ticker", d.Ticker, "price", result.ExecutedPrice, "lots", result.ExecutedLots)
+}
+
 // scalePositionByConfidence scales max position size based on AI confidence level.
 func scalePositionByConfidence(maxRub float64, confidence int) float64 {
 	switch {
@@ -259,6 +453,9 @@ func scalePositionByConfidence(maxRub float64, confidence int) float64 {
 }
 
 func DecisionsToJSON(decisions []ai.AIDecision) string {
+	if decisions == nil {
+		decisions = []ai.AIDecision{}
+	}
 	data, err := json.Marshal(decisions)
 	if err != nil {
 		return "[]"
