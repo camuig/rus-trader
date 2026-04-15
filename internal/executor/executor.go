@@ -94,7 +94,7 @@ func (e *Executor) Execute(decisions []ai.AIDecision) {
 }
 
 func (e *Executor) executeBuy(d ai.AIDecision) {
-	if d.Confidence < e.config.Trading.MinConfidence {
+	if int(d.Confidence) < e.config.Trading.MinConfidence {
 		e.logger.Info("BUY skipped: low confidence",
 			"ticker", d.Ticker, "confidence", d.Confidence, "min", e.config.Trading.MinConfidence)
 		return
@@ -114,7 +114,7 @@ func (e *Executor) executeBuy(d ai.AIDecision) {
 	}
 
 	// Scale position size by confidence
-	maxPosition := scalePositionByConfidence(e.config.Trading.MaxPositionRub, d.Confidence)
+	maxPosition := scalePositionByConfidence(e.config.Trading.MaxPositionRub, int(d.Confidence))
 	if maxPosition > availableRub {
 		maxPosition = availableRub
 	}

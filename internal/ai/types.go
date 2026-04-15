@@ -92,7 +92,7 @@ type AIDecision struct {
 	Ticker     string  `json:"ticker"`
 	StopLoss   float64 `json:"stop_loss"`
 	TakeProfit float64 `json:"take_profit"`
-	Confidence int     `json:"confidence"` // 0-100
+	Confidence float64 `json:"confidence"` // 0-100 (screening) or 0-1 (position manager)
 	Reasoning  string  `json:"reasoning"`
 }
 
