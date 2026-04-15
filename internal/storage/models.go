@@ -77,3 +77,14 @@ type PatternEmbedding struct {
 	PnL           float64   `json:"pnl"`
 	HoldHours     float64   `json:"hold_hours"`
 }
+
+type CycleSnapshot struct {
+	ID            uint      `gorm:"primarykey" json:"id"`
+	CreatedAt     time.Time `json:"created_at"`
+	SnapshotsJSON string    `gorm:"type:text" json:"snapshots_json"`
+	FeaturesJSON  string    `gorm:"type:text" json:"features_json"`
+	PortfolioJSON string    `gorm:"type:text" json:"portfolio_json"`
+	DecisionsJSON string    `gorm:"type:text" json:"decisions_json"`
+	NewsJSON      string    `gorm:"type:text" json:"news_json"`
+	MarketRegime  string    `json:"market_regime"`
+}

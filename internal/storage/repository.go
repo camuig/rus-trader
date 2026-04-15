@@ -361,6 +361,26 @@ func (r *Repository) GetAllClosedEmbeddings() ([]PatternEmbedding, error) {
 	return patterns, err
 }
 
+// Cycle Snapshots
+
+func (r *Repository) SaveCycleSnapshot(snap *CycleSnapshot) error {
+	return r.db.Create(snap).Error
+}
+
+func (r *Repository) GetCycleSnapshots(from, to time.Time) ([]CycleSnapshot, error) {
+	var snapshots []CycleSnapshot
+	err := r.db.Where("created_at >= ? AND created_at <= ?", from, to).
+		Order("created_at ASC").Find(&snapshots).Error
+	return snapshots, err
+}
+
+func (r *Repository) GetTradesInPeriod(from, to time.Time) ([]Trade, error) {
+	var trades []Trade
+	err := r.db.Where("created_at >= ? AND created_at <= ? AND status = ?", from, to, "closed").
+		Order("created_at ASC").Find(&trades).Error
+	return trades, err
+}
+
 func (r *Repository) GetBuyTradeForSell(ticker string) (*Trade, error) {
 	var trade Trade
 	err := r.db.Where("ticker = ? AND action = ? AND status = ?", ticker, "BUY", "closed").

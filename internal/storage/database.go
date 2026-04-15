@@ -26,7 +26,7 @@ func NewDatabase(dbPath string) (*gorm.DB, error) {
 		return nil, fmt.Errorf("set WAL mode: %w", err)
 	}
 
-	if err := db.AutoMigrate(&Trade{}, &AnalysisLog{}, &PortfolioSnapshot{}, &TradeOutcome{}, &JournalLesson{}, &PatternEmbedding{}); err != nil {
+	if err := db.AutoMigrate(&Trade{}, &AnalysisLog{}, &PortfolioSnapshot{}, &TradeOutcome{}, &JournalLesson{}, &PatternEmbedding{}, &CycleSnapshot{}); err != nil {
 		return nil, fmt.Errorf("auto migrate: %w", err)
 	}
 
