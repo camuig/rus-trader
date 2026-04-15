@@ -82,6 +82,53 @@ func BuildScreeningPrompt(req *ScreeningRequest, maxChars int) string {
 	}
 	sb.WriteString("\n")
 
+	// Similar patterns from vector memory
+	if len(req.SimilarPatterns) > 0 {
+		sb.WriteString("## Похожие исторические паттерны\n")
+		for ticker, patterns := range req.SimilarPatterns {
+			if len(patterns) == 0 {
+				continue
+			}
+			var wins, losses int
+			var winPnL, lossPnL float64
+			for _, p := range patterns {
+				if p.Outcome == "win" {
+					wins++
+					winPnL += p.PnL
+				} else {
+					losses++
+					lossPnL += p.PnL
+				}
+			}
+			total := wins + losses
+			wr := 0.0
+			if total > 0 {
+				wr = float64(wins) / float64(total) * 100
+			}
+			sb.WriteString(fmt.Sprintf("%s: %d похожих — %d win", ticker, total, wins))
+			if wins > 0 {
+				sb.WriteString(fmt.Sprintf(" (+avg %.0f₽)", winPnL/float64(wins)))
+			}
+			sb.WriteString(fmt.Sprintf(", %d loss", losses))
+			if losses > 0 {
+				sb.WriteString(fmt.Sprintf(" (avg %.0f₽)", lossPnL/float64(losses)))
+			}
+			sb.WriteString(fmt.Sprintf(". WR %.0f%%.\n", wr))
+			for i, p := range patterns {
+				if i >= 2 {
+					break
+				}
+				feat := p.Features
+				if len([]rune(feat)) > 60 {
+					feat = string([]rune(feat)[:59]) + "…"
+				}
+				sb.WriteString(fmt.Sprintf("  (%.2f) %s → %s %+.0f₽ за %.0fч\n",
+					p.Similarity, feat, p.Outcome, p.PnL, p.HoldHours))
+			}
+		}
+		sb.WriteString("\n")
+	}
+
 	if len(req.TickerNews) > 0 {
 		sb.WriteString("## Новости по тикерам\n")
 		for ticker, news := range req.TickerNews {

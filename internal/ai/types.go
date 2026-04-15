@@ -98,15 +98,16 @@ type AIDecision struct {
 
 // ScreeningRequest is input for the Screening Agent (BUY candidates only).
 type ScreeningRequest struct {
-	TickerFeatures []string          // textual features per ticker
-	Market         MarketContext
-	GlobalNews     []string
-	TickerNews     map[string][]string
-	Lessons        []string          // formatted lesson lines
-	TodayTraded    []string
-	Stats          PerformanceStats
-	CurrentTime    time.Time
-	AvailableRub   float64
+	TickerFeatures  []string            // textual features per ticker
+	Market          MarketContext
+	GlobalNews      []string
+	TickerNews      map[string][]string
+	Lessons         []string            // formatted lesson lines
+	TodayTraded     []string
+	Stats           PerformanceStats
+	CurrentTime     time.Time
+	AvailableRub    float64
+	SimilarPatterns map[string][]PatternMatchInfo // ticker → similar historical patterns
 }
 
 // PositionContext is a single open position for Position Manager.
@@ -160,4 +161,13 @@ type JournalReviewStats struct {
 	AvgHoldHoursWin  float64
 	AvgHoldHoursLoss float64
 	ByExitReason     map[string]int
+}
+
+// PatternMatchInfo is a simplified pattern match for the screening prompt.
+type PatternMatchInfo struct {
+	Features   string
+	Outcome    string
+	PnL        float64
+	HoldHours  float64
+	Similarity float64
 }
