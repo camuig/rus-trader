@@ -19,8 +19,10 @@ import (
 	"github.com/camuig/rus-trader/internal/logger"
 	"github.com/camuig/rus-trader/internal/moex"
 	"github.com/camuig/rus-trader/internal/scheduler"
+	"github.com/camuig/rus-trader/internal/sentiment"
 	"github.com/camuig/rus-trader/internal/storage"
 	"github.com/camuig/rus-trader/internal/telegram"
+	"github.com/camuig/rus-trader/internal/vectordb"
 	"github.com/camuig/rus-trader/internal/web"
 )
 
@@ -88,7 +90,24 @@ func main() {
 		exec.SetJournal(j)
 	}
 
-	sched := scheduler.NewScheduler(bc, moexClient, aiClient, exec, repo, notifier, tradeGuard, cfg, log, divFetcher, j)
+	// Sentiment scorer (optional)
+	var sentScorer *sentiment.Scorer
+	if cfg.Sentiment.Enabled {
+		sentScorer = sentiment.NewScorer(aiClient, cfg, log)
+	}
+
+	// Vector pattern store (optional)
+	var vs *vectordb.Store
+	if cfg.VectorDB.Enabled && cfg.VectorDB.OpenRouterAPIKey != "" {
+		embedder := vectordb.NewEmbeddingClient(cfg.VectorDB.OpenRouterAPIKey, cfg.VectorDB.EmbeddingModel, log)
+		vs = vectordb.NewStore(repo, embedder, log)
+		if err := vs.LoadAll(); err != nil {
+			log.Error("vector store load failed", "error", err)
+		}
+		exec.SetVectorStore(vs)
+	}
+
+	sched := scheduler.NewScheduler(bc, moexClient, aiClient, exec, repo, notifier, tradeGuard, cfg, log, divFetcher, j, sentScorer, vs)
 	webServer := web.NewServer(bc, repo, cfg, log, moexClient)
 
 	// Start scheduler in goroutine

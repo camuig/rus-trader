@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -19,24 +20,29 @@ import (
 	"github.com/camuig/rus-trader/internal/journal"
 	"github.com/camuig/rus-trader/internal/logger"
 	"github.com/camuig/rus-trader/internal/moex"
+	"github.com/camuig/rus-trader/internal/orderbook"
 	"github.com/camuig/rus-trader/internal/screener"
+	"github.com/camuig/rus-trader/internal/sentiment"
 	"github.com/camuig/rus-trader/internal/storage"
 	"github.com/camuig/rus-trader/internal/telegram"
+	"github.com/camuig/rus-trader/internal/vectordb"
 )
 
 type Scheduler struct {
-	broker     *broker.BrokerClient
-	moex       *moex.Client
-	ai         *ai.DeepSeekClient
-	executor   *executor.Executor
-	repo       *storage.Repository
-	notifier   *telegram.Notifier
-	guard      *guard.TradeGuard
-	config     *config.Config
-	logger     *logger.Logger
-	loc        *time.Location
-	divFetcher *dividends.Fetcher
-	journal    *journal.Journal
+	broker      *broker.BrokerClient
+	moex        *moex.Client
+	ai          *ai.DeepSeekClient
+	executor    *executor.Executor
+	repo        *storage.Repository
+	notifier    *telegram.Notifier
+	guard       *guard.TradeGuard
+	config      *config.Config
+	logger      *logger.Logger
+	loc         *time.Location
+	divFetcher  *dividends.Fetcher
+	journal     *journal.Journal
+	sentiment   *sentiment.Scorer
+	vectorStore *vectordb.Store
 }
 
 func NewScheduler(
@@ -51,20 +57,24 @@ func NewScheduler(
 	log *logger.Logger,
 	divFetcher *dividends.Fetcher,
 	j *journal.Journal,
+	sentScorer *sentiment.Scorer,
+	vs *vectordb.Store,
 ) *Scheduler {
 	return &Scheduler{
-		broker:     bc,
-		moex:       moexClient,
-		ai:         aiClient,
-		executor:   exec,
-		repo:       repo,
-		notifier:   notifier,
-		guard:      g,
-		config:     cfg,
-		logger:     log,
-		loc:        cfg.MOEXLocation(),
-		divFetcher: divFetcher,
-		journal:    j,
+		broker:      bc,
+		moex:        moexClient,
+		ai:          aiClient,
+		executor:    exec,
+		repo:        repo,
+		notifier:    notifier,
+		guard:       g,
+		config:      cfg,
+		logger:      log,
+		loc:         cfg.MOEXLocation(),
+		divFetcher:  divFetcher,
+		journal:     j,
+		sentiment:   sentScorer,
+		vectorStore: vs,
 	}
 }
 
@@ -314,7 +324,19 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 		}
 	}
 
-	// 15. Build textual features for each screened snapshot
+	// 15. Fetch order book metrics for screened tickers (parallel)
+	obMetrics := s.fetchOrderBooks(ctx, snapshots)
+
+	// 15a. Collect screened ticker names for sentiment
+	var screenerTickers []string
+	for _, snap := range snapshots {
+		screenerTickers = append(screenerTickers, snap.Ticker)
+	}
+
+	// 15b. Score sentiment (LLM, non-fatal)
+	sentimentMap := s.scoreSentiment(ctx, tickerNews, screenerTickers)
+
+	// 15c. Build textual features with all data sources
 	featuresMap := make(map[string]string, len(snapshots))
 	var tickerFeaturesList []string
 	for _, snap := range snapshots {
@@ -322,11 +344,22 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 		if d, ok := divMap[snap.Ticker]; ok {
 			divPtr = &d
 		}
-		tf := features.BuildTickerFeatures(snap, divPtr, nil, nil)
+		var obPtr *orderbook.OrderBookMetrics
+		if m, ok := obMetrics[snap.Ticker]; ok {
+			obPtr = m
+		}
+		var sentPtr *sentiment.SentimentResult
+		if r, ok := sentimentMap[snap.Ticker]; ok {
+			sentPtr = r
+		}
+		tf := features.BuildTickerFeatures(snap, divPtr, obPtr, sentPtr)
 		featuresMap[tf.Ticker] = tf.Summary
 		tickerFeaturesList = append(tickerFeaturesList, tf.Summary)
 	}
 	s.executor.SetFeatures(featuresMap)
+
+	// 15d. Find similar historical patterns (vector search)
+	similarPatterns := s.findSimilarPatterns(ctx, featuresMap)
 
 	// 16. Build ticker news map (map[string][]string)
 	tickerNewsMap := make(map[string][]string)
@@ -345,15 +378,16 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 	// Screening Agent: find BUY candidates
 	g.Go(func() error {
 		screeningReq := &ai.ScreeningRequest{
-			TickerFeatures: tickerFeaturesList,
-			Market:         marketCtx,
-			GlobalNews:     globalNews,
-			TickerNews:     tickerNewsMap,
-			Lessons:        lessonLines,
-			TodayTraded:    todayTraded,
-			Stats:          stats,
-			CurrentTime:    time.Now().In(s.loc),
-			AvailableRub:   portfolio.AvailableRub,
+			TickerFeatures:  tickerFeaturesList,
+			Market:          marketCtx,
+			GlobalNews:      globalNews,
+			TickerNews:      tickerNewsMap,
+			Lessons:         lessonLines,
+			TodayTraded:     todayTraded,
+			Stats:           stats,
+			CurrentTime:     time.Now().In(s.loc),
+			AvailableRub:    portfolio.AvailableRub,
+			SimilarPatterns: similarPatterns,
 		}
 		decs, raw, err := s.ai.ScreeningAnalyze(gctx, screeningReq)
 		if err != nil {
@@ -575,6 +609,130 @@ func computeMarketContext(snapshots []broker.CandleSnapshot) ai.MarketContext {
 		ctx.Regime = "mixed"
 	}
 	return ctx
+}
+
+func (s *Scheduler) fetchOrderBooks(ctx context.Context, snapshots []broker.CandleSnapshot) map[string]*orderbook.OrderBookMetrics {
+	if !s.config.OrderBook.Enabled {
+		return nil
+	}
+
+	result := make(map[string]*orderbook.OrderBookMetrics, len(snapshots))
+	var mu sync.Mutex
+	sem := make(chan struct{}, s.config.OrderBook.Concurrency)
+
+	var wg sync.WaitGroup
+	for _, snap := range snapshots {
+		snap := snap
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			uid, err := s.broker.ResolveTickerToUID(snap.Ticker)
+			if err != nil {
+				return
+			}
+			book, err := s.broker.GetOrderBookFull(uid, s.config.OrderBook.Depth)
+			if err != nil {
+				s.logger.Debug("order book fetch failed", "ticker", snap.Ticker, "error", err)
+				return
+			}
+			metrics := orderbook.ComputeMetrics(snap.Ticker, book, s.config.OrderBook.WallThreshold)
+			mu.Lock()
+			result[snap.Ticker] = &metrics
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+
+	s.logger.Info("order book fetched", "count", len(result))
+	return result
+}
+
+func (s *Scheduler) scoreSentiment(ctx context.Context, tickerNews map[string][]moex.NewsItem, tickers []string) map[string]*sentiment.SentimentResult {
+	if s.sentiment == nil || !s.config.Sentiment.Enabled {
+		return nil
+	}
+
+	tickerTexts := make(map[string][]string)
+	maxItems := s.config.Sentiment.MaxItemsPerTicker
+
+	for _, ticker := range tickers {
+		var texts []string
+		if items, ok := tickerNews[ticker]; ok {
+			for _, n := range items {
+				if len(texts) >= maxItems {
+					break
+				}
+				texts = append(texts, n.Title)
+			}
+		}
+		if s.config.Sentiment.ForumEnabled {
+			forumCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			posts, err := sentiment.FetchForumPosts(forumCtx, ticker, s.config.Sentiment.MaxForumPosts)
+			cancel()
+			if err == nil {
+				for _, p := range posts {
+					if len(texts) >= maxItems {
+						break
+					}
+					texts = append(texts, p.Title)
+				}
+			}
+		}
+		if len(texts) > 0 {
+			tickerTexts[ticker] = texts
+		}
+	}
+
+	if len(tickerTexts) == 0 {
+		return nil
+	}
+
+	results, err := s.sentiment.ScoreBatch(ctx, tickerTexts)
+	if err != nil {
+		s.logger.Error("sentiment scoring failed", "error", err)
+		return nil
+	}
+
+	s.logger.Info("sentiment scored", "tickers", len(results))
+	return results
+}
+
+func (s *Scheduler) findSimilarPatterns(ctx context.Context, features map[string]string) map[string][]ai.PatternMatchInfo {
+	if s.vectorStore == nil || !s.config.VectorDB.Enabled {
+		return nil
+	}
+
+	result := make(map[string][]ai.PatternMatchInfo)
+	for ticker, feat := range features {
+		matches, err := s.vectorStore.FindSimilar(ctx, feat,
+			s.config.VectorDB.MaxSimilarPatterns, s.config.VectorDB.MinSimilarity)
+		if err != nil {
+			s.logger.Debug("vector search failed", "ticker", ticker, "error", err)
+			continue
+		}
+		if len(matches) == 0 {
+			continue
+		}
+		var infos []ai.PatternMatchInfo
+		for _, m := range matches {
+			infos = append(infos, ai.PatternMatchInfo{
+				Features:   m.EntryFeatures,
+				Outcome:    m.Outcome,
+				PnL:        m.PnL,
+				HoldHours:  m.HoldHours,
+				Similarity: m.Similarity,
+			})
+		}
+		result[ticker] = infos
+	}
+
+	if len(result) > 0 {
+		s.logger.Info("similar patterns found", "tickers_with_matches", len(result))
+	}
+	return result
 }
 
 func (s *Scheduler) isWithinTradingHours() bool {
