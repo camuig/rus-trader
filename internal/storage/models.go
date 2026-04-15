@@ -18,9 +18,10 @@ type Trade struct {
 	StopLossOrderID string  `json:"stop_loss_order_id"`
 	TakeProfitOrderID string `json:"take_profit_order_id"`
 
-	PnL       float64 `gorm:"column:pnl" json:"pnl"`
-	Reasoning string  `gorm:"type:text" json:"reasoning"`
-	Status    string  `gorm:"not null;default:'open'" json:"status"` // open, closed
+	PnL           float64 `gorm:"column:pnl" json:"pnl"`
+	Reasoning     string  `gorm:"type:text" json:"reasoning"`
+	EntryFeatures string  `gorm:"type:text" json:"entry_features"`
+	Status        string  `gorm:"not null;default:'open'" json:"status"` // open, closed
 }
 
 type AnalysisLog struct {
@@ -41,4 +42,26 @@ type PortfolioSnapshot struct {
 	AvailableRub   float64 `json:"available_rub"`
 	PositionsCount int     `json:"positions_count"`
 	PositionsJSON  string  `gorm:"type:text" json:"positions_json"`
+}
+
+type TradeOutcome struct {
+	ID                uint      `gorm:"primarykey" json:"id"`
+	CreatedAt         time.Time `json:"created_at"`
+	TradeID           uint      `gorm:"not null" json:"trade_id"`
+	Hypothesis        string    `gorm:"type:text" json:"hypothesis"`
+	EntryFeatures     string    `gorm:"type:text" json:"entry_features"`
+	ExitReason        string    `json:"exit_reason"`
+	Outcome           string    `json:"outcome"`
+	PnL               float64   `json:"pnl"`
+	HoldDurationHours float64   `json:"hold_duration_hours"`
+	WhatHappened      string    `gorm:"type:text" json:"what_happened"`
+}
+
+type JournalLesson struct {
+	ID             uint      `gorm:"primarykey" json:"id"`
+	CreatedAt      time.Time `json:"created_at"`
+	ReviewDate     string    `gorm:"not null;index" json:"review_date"`
+	LessonsJSON    string    `gorm:"type:text" json:"lessons_json"`
+	RawResponse    string    `gorm:"type:text" json:"raw_response"`
+	TradesReviewed int       `json:"trades_reviewed"`
 }

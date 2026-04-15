@@ -204,6 +204,74 @@ func (r *Repository) GetPerformanceStats7d() (PerformanceStats7d, error) {
 	return stats, nil
 }
 
+// GetLosingStreak returns the number of consecutive losing trades (most recent first).
+func (r *Repository) GetLosingStreak() (int, error) {
+	var trades []Trade
+	err := r.db.Where("status = ? AND action = ?", "closed", "SELL").
+		Order("created_at DESC").Limit(50).Find(&trades).Error
+	if err != nil {
+		return 0, err
+	}
+
+	streak := 0
+	for _, t := range trades {
+		if t.PnL >= 0 {
+			break
+		}
+		streak++
+	}
+	return streak, nil
+}
+
+// GetLosingStreakTickers returns tickers that have N or more consecutive losing SELL
+// trades at the end of their history, within the last `windowDays` days.
+// Older trades are ignored so the block naturally expires over time.
+// If windowDays <= 0, the streak window is unlimited.
+func (r *Repository) GetLosingStreakTickers(minStreak int, windowDays int) (map[string]int, error) {
+	if minStreak <= 0 {
+		return nil, nil
+	}
+	query := r.db.Where("status = ? AND action = ?", "closed", "SELL")
+	if windowDays > 0 {
+		cutoff := time.Now().Add(-time.Duration(windowDays) * 24 * time.Hour)
+		query = query.Where("created_at >= ?", cutoff)
+	}
+	var trades []Trade
+	if err := query.Order("created_at DESC").Limit(300).Find(&trades).Error; err != nil {
+		return nil, err
+	}
+	// Walk from most recent; track per-ticker streak until a non-losing trade breaks it.
+	streaks := make(map[string]int)
+	broken := make(map[string]bool)
+	for _, t := range trades {
+		if broken[t.Ticker] {
+			continue
+		}
+		if t.PnL < 0 {
+			streaks[t.Ticker]++
+		} else {
+			broken[t.Ticker] = true
+		}
+	}
+	result := make(map[string]int)
+	for ticker, s := range streaks {
+		if s >= minStreak {
+			result[ticker] = s
+		}
+	}
+	return result, nil
+}
+
+// GetRecentLossTickers returns tickers that had losing trades in the last N days.
+func (r *Repository) GetRecentLossTickers(days int) ([]string, error) {
+	cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour)
+	var tickers []string
+	err := r.db.Model(&Trade{}).
+		Where("status = ? AND action = ? AND pnl < 0 AND created_at >= ?", "closed", "SELL", cutoff).
+		Distinct("ticker").Pluck("ticker", &tickers).Error
+	return tickers, err
+}
+
 // Analysis Logs
 
 func (r *Repository) SaveAnalysisLog(log *AnalysisLog) error {
@@ -223,4 +291,60 @@ func (r *Repository) GetLatestSnapshot() (*PortfolioSnapshot, error) {
 		return nil, err
 	}
 	return &snapshot, nil
+}
+
+// Trade Outcomes
+
+func (r *Repository) SaveTradeOutcome(outcome *TradeOutcome) error {
+	return r.db.Create(outcome).Error
+}
+
+func (r *Repository) GetOutcomesSinceLastReview() ([]TradeOutcome, error) {
+	var lastLesson JournalLesson
+	hasLast := r.db.Order("review_date DESC").First(&lastLesson).Error == nil
+
+	var outcomes []TradeOutcome
+	query := r.db.Order("created_at DESC")
+	if hasLast {
+		query = query.Where("created_at > ?", lastLesson.CreatedAt)
+	}
+	err := query.Limit(50).Find(&outcomes).Error
+	return outcomes, err
+}
+
+func (r *Repository) GetOutcomesForDate(date string) ([]TradeOutcome, error) {
+	var outcomes []TradeOutcome
+	err := r.db.Where("DATE(created_at) = ?", date).
+		Order("created_at DESC").Find(&outcomes).Error
+	return outcomes, err
+}
+
+// Journal Lessons
+
+func (r *Repository) SaveJournalLesson(lesson *JournalLesson) error {
+	return r.db.Create(lesson).Error
+}
+
+func (r *Repository) GetLatestLessons(maxAgeDays int, maxCount int) ([]JournalLesson, error) {
+	cutoff := time.Now().AddDate(0, 0, -maxAgeDays)
+	var lessons []JournalLesson
+	err := r.db.Where("created_at >= ?", cutoff).
+		Order("created_at DESC").Limit(maxCount).Find(&lessons).Error
+	return lessons, err
+}
+
+func (r *Repository) HasReviewForDate(date string) (bool, error) {
+	var count int64
+	err := r.db.Model(&JournalLesson{}).Where("review_date = ?", date).Count(&count).Error
+	return count > 0, err
+}
+
+func (r *Repository) GetBuyTradeForSell(ticker string) (*Trade, error) {
+	var trade Trade
+	err := r.db.Where("ticker = ? AND action = ? AND status = ?", ticker, "BUY", "closed").
+		Order("updated_at DESC").First(&trade).Error
+	if err != nil {
+		return nil, err
+	}
+	return &trade, nil
 }
