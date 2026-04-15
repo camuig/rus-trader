@@ -2,6 +2,7 @@ package ai
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -156,4 +157,70 @@ func (d *DeepSeekClient) ScreeningAnalyze(ctx context.Context, req *ScreeningReq
 		}
 	}
 	return buys, rawResponse, nil
+}
+
+// PositionAnalyze calls DeepSeek for open position management (HOLD/SELL).
+func (d *DeepSeekClient) PositionAnalyze(ctx context.Context, req *PositionRequest) ([]AIDecision, string, error) {
+	userPrompt := BuildPositionPrompt(req, d.cfg.AIAgents.PositionManager.MaxChars)
+
+	d.logger.Info("position manager prompt built",
+		"chars", len([]rune(userPrompt)), "positions", len(req.Positions))
+
+	rawResponse, err := d.callLLM(ctx, positionSystemPrompt, userPrompt, d.model, d.cfg.DeepSeek.TimeoutSeconds)
+	if err != nil {
+		return nil, "", fmt.Errorf("position manager: %w", err)
+	}
+
+	d.logger.Info("position manager response", "length", len(rawResponse))
+	d.logger.Debug("position manager raw response", "content", rawResponse)
+
+	decisions, err := ParseDecisions(rawResponse)
+	if err != nil {
+		return nil, rawResponse, fmt.Errorf("parse position decisions: %w", err)
+	}
+
+	var filtered []AIDecision
+	for _, dec := range decisions {
+		if dec.Action == "HOLD" || dec.Action == "SELL" {
+			filtered = append(filtered, dec)
+		}
+	}
+	return filtered, rawResponse, nil
+}
+
+// JournalReview calls DeepSeek to analyze closed trades and generate lessons.
+func (d *DeepSeekClient) JournalReview(ctx context.Context, req *JournalReviewRequest) ([]map[string]interface{}, string, error) {
+	model := d.model
+	if d.cfg.AIAgents.JournalReview.Model != "" {
+		model = d.cfg.AIAgents.JournalReview.Model
+	}
+
+	userPrompt := BuildJournalReviewPrompt(req, d.cfg.AIAgents.JournalReview.MaxChars)
+
+	d.logger.Info("journal review prompt built",
+		"chars", len([]rune(userPrompt)), "outcomes", len(req.Outcomes))
+
+	rawResponse, err := d.callLLM(ctx, journalSystemPrompt, userPrompt, model, d.cfg.DeepSeek.TimeoutSeconds)
+	if err != nil {
+		return nil, "", fmt.Errorf("journal review: %w", err)
+	}
+
+	d.logger.Info("journal review response", "length", len(rawResponse))
+
+	// Parse lessons from response — return raw parsed JSON, caller will handle typing
+	cleaned := StripThinkTags(rawResponse)
+	cleaned = stripCodeFences(cleaned)
+
+	// Try direct parse
+	var rawLessons []map[string]interface{}
+	if err := json.Unmarshal([]byte(cleaned), &rawLessons); err != nil {
+		// Try to extract JSON array
+		if start := strings.Index(cleaned, "["); start >= 0 {
+			if end := strings.LastIndex(cleaned, "]"); end > start {
+				_ = json.Unmarshal([]byte(cleaned[start:end+1]), &rawLessons)
+			}
+		}
+	}
+
+	return rawLessons, rawResponse, nil
 }
