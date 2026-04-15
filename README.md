@@ -281,6 +281,42 @@ vectordb:
   min_similarity: 0.7
 ```
 
+## Phase 3: Pipeline Refactoring + Backtesting
+
+### Scheduler Refactoring
+Scheduler разбит на 9 файлов по ответственности (вместо одного ~1000-строчного файла):
+- `scheduler.go` — struct, init, run loop (104 строки)
+- `cycle.go` — runCycle orchestration + cycleState
+- `data.go` — data fetching (order book, sentiment, stats)
+- `features.go` — не отдельный файл, enrichData в cycle.go
+- `agents.go` — AI agents + daily review
+- `execution.go` — guard + executor + trailing stops + cycle snapshots
+- `reconcile.go` — orphan trade cleanup
+- `snapshots.go` — analysis logs, portfolio snapshots
+- `helpers.go` — utility functions
+
+### Cycle Snapshots
+Каждый торговый цикл сохраняет полный snapshot: свечи, features, портфель, решения AI, новости, режим рынка. Это фундамент для будущего full-pipeline backtesting.
+
+### Backtester CLI
+```bash
+# Базовый replay
+go run ./cmd/backtest/ -config config.yaml -db data/rus-trader.db
+
+# Сравнение параметров
+go run ./cmd/backtest/ -config config.yaml -db data/rus-trader.db \
+  --min-confidence 60 --min-rr 1.2
+
+# JSON output для автоматизации
+go run ./cmd/backtest/ -config config.yaml -db data/rus-trader.db --json
+
+# Диапазон дат
+go run ./cmd/backtest/ -config config.yaml -db data/rus-trader.db \
+  --from 2026-04-01 --to 2026-04-15
+```
+
+Backtester прогоняет исторические BUY-SELL пары через guard с изменёнными параметрами и показывает: как изменился бы P&L, win rate, max drawdown. Поддерживает override для: min-confidence, min-rr, min-sl, min-tp, max-daily-loss, require-uptrend, min-atr.
+
 ## Торговые часы
 
 Бот активен в торговые часы MOEX: **10:00–18:50 MSK**, понедельник–пятница.
