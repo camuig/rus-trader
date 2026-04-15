@@ -1,0 +1,113 @@
+package ai
+
+import (
+	"fmt"
+	"strings"
+)
+
+const screeningSystemPrompt = `Роль: Аналитик-скринер MOEX (горизонт 1-3 дня).
+Задача: Из предложенных тикеров отбери лучшие BUY-сетапы.
+
+Ты НЕ управляешь позициями — только ищешь новые входы.
+
+Как оценивать:
+- Качество тренда и импульса.
+- Подтверждение объёмом (повышенный объём усиливает сигнал).
+- Близость к уровням поддержки/сопротивления.
+- Дивидендный фактор (предстоящая отсечка = катализатор роста).
+- Новостной фон (позитив/негатив по тикеру и рынку).
+- Уроки из прошлых сделок — не повторяй известные ошибки.
+
+Confidence:
+  85-95: трендовый сетап + объём + катализатор.
+  70-84: рабочий сетап, один фактор неопределённости.
+  <70: не возвращай — будет отсеяно.
+
+SL/TP:
+  SL строго ниже цены входа. Рассчитывай через ATR.
+  TP — реалистичный, с учётом сопротивления.
+
+Формат: JSON массив BUY-решений. Пустой [] — если ни один тикер не проходит фильтр.
+[{"action":"BUY","ticker":"SBER","stop_loss":250.0,"take_profit":290.0,"confidence":80,"reasoning":"Причина"}]
+`
+
+func BuildScreeningPrompt(req *ScreeningRequest, maxChars int) string {
+	if maxChars <= 0 {
+		maxChars = 16000
+	}
+
+	var sb strings.Builder
+
+	if !req.CurrentTime.IsZero() {
+		sb.WriteString(fmt.Sprintf("## Время: %s MSK\n\n", req.CurrentTime.Format("02.01.2006 15:04")))
+	}
+
+	if req.Market.IndexTicker != "" {
+		sb.WriteString(fmt.Sprintf("## Фон рынка: %s: 1д %+.2f%%, 3д %+.2f%%, 1н %+.2f%% — %s\n\n",
+			req.Market.IndexTicker, req.Market.ChangePct1d, req.Market.ChangePct3d, req.Market.ChangePct1w, req.Market.Regime))
+	}
+
+	if req.Stats.TradeCount7d > 0 {
+		sb.WriteString("## Статистика 7 дней\n")
+		sb.WriteString(fmt.Sprintf("Сделок: %d, Win rate: %.0f%%, P&L: %+.0f ₽\n",
+			req.Stats.TradeCount7d, req.Stats.WinRate7d, req.Stats.TotalPnL7d))
+		if req.Stats.LosingStreak >= 3 {
+			sb.WriteString(fmt.Sprintf("⚠ %d убыточных подряд — повышай планку.\n", req.Stats.LosingStreak))
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString(fmt.Sprintf("## Бюджет: %.0f ₽ доступно\n\n", req.AvailableRub))
+
+	if len(req.Lessons) > 0 {
+		sb.WriteString("## Уроки из последних сделок\n")
+		for _, l := range req.Lessons {
+			sb.WriteString("- ")
+			sb.WriteString(l)
+			sb.WriteString("\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	if len(req.TodayTraded) > 0 {
+		sb.WriteString("## Сегодня уже торговали (НЕ покупать): ")
+		sb.WriteString(strings.Join(req.TodayTraded, ", "))
+		sb.WriteString("\n\n")
+	}
+
+	sb.WriteString("## Тикеры\n")
+	for _, f := range req.TickerFeatures {
+		sb.WriteString(f)
+		sb.WriteString("\n")
+	}
+	sb.WriteString("\n")
+
+	if len(req.TickerNews) > 0 {
+		sb.WriteString("## Новости по тикерам\n")
+		for ticker, news := range req.TickerNews {
+			for _, n := range news {
+				sb.WriteString(fmt.Sprintf("- %s: %s\n", ticker, n))
+			}
+		}
+		sb.WriteString("\n")
+	}
+
+	if len(req.GlobalNews) > 0 {
+		sb.WriteString("## Общий фон\n")
+		for _, n := range req.GlobalNews {
+			sb.WriteString("- ")
+			sb.WriteString(n)
+			sb.WriteString("\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("\nОтбери лучшие BUY-сетапы в JSON.")
+
+	result := sb.String()
+	if len([]rune(result)) > maxChars {
+		r := []rune(result)
+		result = string(r[:maxChars-1]) + "…"
+	}
+	return result
+}
