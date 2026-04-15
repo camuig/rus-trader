@@ -241,6 +241,46 @@ ai_agents:
     model: ""  # пустое = основная модель
 ```
 
+## Phase 2: Data Enrichment
+
+### Order Book Metrics
+Бот запрашивает стакан L2 (20 уровней) для каждого screened тикера через T-Invest `GetOrderBook`. Вычисляет три метрики:
+- **Bid/Ask Imbalance** — соотношение bid/ask объёмов (>1.5 = давление покупателей)
+- **Spread** — bid/ask спред в процентах
+- **Wall Detection** — крупные уровни (>=5x среднего) — "стенки" в стакане
+
+Метрики добавляются в текстовые features: `"стакан: bid давление 1.8x, спред 0.12%, bid wall 298.50 (7.2x)"`.
+
+### Sentiment Scoring
+Новости (Finam, world) + посты с форума SmartLab прогоняются через LLM (дешёвая модель `deepseek-chat`) для оценки sentiment по каждому тикеру: от -1.0 (крайне негативный) до +1.0 (крайне позитивный).
+
+Результат в features: `"sentiment +0.6 (рекордные дивиденды)"`.
+
+### Vector Pattern Memory
+При каждой сделке сохраняется embedding текстовых features через OpenRouter (`text-embedding-3-small`). При screening для каждого кандидата ищутся исторически похожие паттерны (cosine similarity) и их результаты.
+
+В промпт Screening Agent: `"SBER: 5 похожих — 3 win (+avg 2.8%), 2 loss. WR 60%."`.
+
+Конфигурация:
+```yaml
+orderbook:
+  enabled: true
+  depth: 20
+  wall_threshold: 5.0
+
+sentiment:
+  enabled: true
+  model: "deepseek-chat"
+  forum_enabled: true
+
+vectordb:
+  enabled: false  # требует OpenRouter API key
+  openrouter_api_key: "sk-or-..."
+  embedding_model: "openai/text-embedding-3-small"
+  max_similar_patterns: 5
+  min_similarity: 0.7
+```
+
 ## Торговые часы
 
 Бот активен в торговые часы MOEX: **10:00–18:50 MSK**, понедельник–пятница.
