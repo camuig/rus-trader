@@ -322,7 +322,7 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 		if d, ok := divMap[snap.Ticker]; ok {
 			divPtr = &d
 		}
-		tf := features.BuildTickerFeatures(snap, divPtr)
+		tf := features.BuildTickerFeatures(snap, divPtr, nil, nil)
 		featuresMap[tf.Ticker] = tf.Summary
 		tickerFeaturesList = append(tickerFeaturesList, tf.Summary)
 	}

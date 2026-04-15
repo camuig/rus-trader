@@ -8,6 +8,8 @@ import (
 	"github.com/camuig/rus-trader/internal/broker"
 	"github.com/camuig/rus-trader/internal/dividends"
 	"github.com/camuig/rus-trader/internal/indicators"
+	"github.com/camuig/rus-trader/internal/orderbook"
+	"github.com/camuig/rus-trader/internal/sentiment"
 )
 
 // containsAny возвращает true если строка содержит хотя бы одну из подстрок (без учёта регистра).
@@ -41,7 +43,7 @@ func TestBuildFeatures_Uptrend(t *testing.T) {
 		ATR14:     3.0,
 	}
 	s := snap("SBER", 305.20, ind)
-	tf := BuildTickerFeatures(s, nil)
+	tf := BuildTickerFeatures(s, nil, nil, nil)
 
 	if !containsAny(tf.Summary, "аптренд") {
 		t.Errorf("ожидался аптренд, получено: %s", tf.Summary)
@@ -60,7 +62,7 @@ func TestBuildFeatures_Downtrend(t *testing.T) {
 		ATR14:     2.0,
 	}
 	s := snap("VTBR", 150.0, ind)
-	tf := BuildTickerFeatures(s, nil)
+	tf := BuildTickerFeatures(s, nil, nil, nil)
 
 	if !containsAny(tf.Summary, "даунтренд") {
 		t.Errorf("ожидался даунтренд, получено: %s", tf.Summary)
@@ -81,7 +83,7 @@ func TestBuildFeatures_WithDividend(t *testing.T) {
 		YieldPct:  8.2,
 		ExDivDate: time.Now().Add(12 * 24 * time.Hour),
 	}
-	tf := BuildTickerFeatures(s, div)
+	tf := BuildTickerFeatures(s, div, nil, nil)
 
 	if !containsAny(tf.Summary, "дивиденд") {
 		t.Errorf("ожидался дивиденд, получено: %s", tf.Summary)
@@ -102,7 +104,7 @@ func TestBuildFeatures_NearResistance(t *testing.T) {
 		Support:    98.0,
 	}
 	s := snap("GAZP", 100.0, ind)
-	tf := BuildTickerFeatures(s, nil)
+	tf := BuildTickerFeatures(s, nil, nil, nil)
 
 	if !containsAny(tf.Summary, "сопротивл") {
 		t.Errorf("ожидалось упоминание сопротивления, получено: %s", tf.Summary)
@@ -118,7 +120,7 @@ func TestBuildFeatures_Oversold(t *testing.T) {
 		ATR14:     1.5,
 	}
 	s := snap("LKOH", 200.0, ind)
-	tf := BuildTickerFeatures(s, nil)
+	tf := BuildTickerFeatures(s, nil, nil, nil)
 
 	if !containsAny(tf.Summary, "перепродан") {
 		t.Errorf("ожидался RSI перепродан, получено: %s", tf.Summary)
@@ -127,7 +129,7 @@ func TestBuildFeatures_Oversold(t *testing.T) {
 
 func TestBuildFeatures_EmptyIndicators(t *testing.T) {
 	s := snap("MOEX", 150.0, indicators.Indicators{})
-	tf := BuildTickerFeatures(s, nil)
+	tf := BuildTickerFeatures(s, nil, nil, nil)
 
 	if tf.Summary == "" {
 		t.Error("ожидалась непустая строка summary")
@@ -137,5 +139,29 @@ func TestBuildFeatures_EmptyIndicators(t *testing.T) {
 	}
 	if !containsAny(tf.Summary, "150") {
 		t.Errorf("ожидалась цена 150 в summary, получено: %s", tf.Summary)
+	}
+}
+
+func TestBuildFeatures_WithOrderBook(t *testing.T) {
+	s := snap("TEST", 100, indicators.Indicators{RSI14: 55, EMA9: 101, EMA21: 99, ATR14: 2.0, RelVolume: 1.0})
+	ob := &orderbook.OrderBookMetrics{
+		Ticker: "TEST", BidAskImbalance: 2.0, SpreadPct: 0.15,
+		BidWall: &orderbook.Wall{Price: 98.0, Volume: 5000, Ratio: 6.2},
+	}
+	tf := BuildTickerFeatures(s, nil, ob, nil)
+	if !containsAny(tf.Summary, "bid давление", "стакан") {
+		t.Errorf("expected order book mention: %s", tf.Summary)
+	}
+	if !containsAny(tf.Summary, "wall") {
+		t.Errorf("expected wall mention: %s", tf.Summary)
+	}
+}
+
+func TestBuildFeatures_WithSentiment(t *testing.T) {
+	s := snap("TEST", 100, indicators.Indicators{RSI14: 55, EMA9: 101, EMA21: 99, ATR14: 2.0, RelVolume: 1.0})
+	sent := &sentiment.SentimentResult{Ticker: "TEST", Score: 0.7, Label: "positive", Reason: "рекордные дивиденды"}
+	tf := BuildTickerFeatures(s, nil, nil, sent)
+	if !containsAny(tf.Summary, "sentiment", "+0.7") {
+		t.Errorf("expected sentiment mention: %s", tf.Summary)
 	}
 }

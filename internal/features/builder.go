@@ -8,6 +8,8 @@ import (
 
 	"github.com/camuig/rus-trader/internal/broker"
 	"github.com/camuig/rus-trader/internal/dividends"
+	"github.com/camuig/rus-trader/internal/orderbook"
+	"github.com/camuig/rus-trader/internal/sentiment"
 )
 
 // TickerFeature содержит тикер и сформированную текстовую строку признаков.
@@ -18,7 +20,7 @@ type TickerFeature struct {
 
 // BuildTickerFeatures конвертирует числовой снэпшот и опциональные данные о дивидендах
 // в компактную текстовую строку для AI-анализа.
-func BuildTickerFeatures(snap broker.CandleSnapshot, div *dividends.DividendInfo) TickerFeature {
+func BuildTickerFeatures(snap broker.CandleSnapshot, div *dividends.DividendInfo, ob *orderbook.OrderBookMetrics, sent *sentiment.SentimentResult) TickerFeature {
 	ind := snap.Indicators
 	price := snap.LastPrice
 	if price == 0 {
@@ -145,6 +147,32 @@ func BuildTickerFeatures(snap broker.CandleSnapshot, div *dividends.DividendInfo
 	if div != nil && !div.ExDivDate.IsZero() && div.ExDivDate.After(time.Now()) {
 		days := int(math.Round(time.Until(div.ExDivDate).Hours() / 24))
 		parts = append(parts, fmt.Sprintf("дивиденд %.1f%% (отсечка через %d дн)", div.YieldPct, days))
+	}
+
+	// 9. Order book
+	if ob != nil {
+		var obParts []string
+		switch {
+		case ob.BidAskImbalance >= 1.5:
+			obParts = append(obParts, fmt.Sprintf("bid давление %.1fx", ob.BidAskImbalance))
+		case ob.BidAskImbalance > 0 && ob.BidAskImbalance <= 0.7:
+			obParts = append(obParts, fmt.Sprintf("ask давление (imb %.1f)", ob.BidAskImbalance))
+		default:
+			obParts = append(obParts, "нейтральный")
+		}
+		obParts = append(obParts, fmt.Sprintf("спред %.2f%%", ob.SpreadPct))
+		if ob.BidWall != nil {
+			obParts = append(obParts, fmt.Sprintf("bid wall %.2f (%.1fx)", ob.BidWall.Price, ob.BidWall.Ratio))
+		}
+		if ob.AskWall != nil {
+			obParts = append(obParts, fmt.Sprintf("ask wall %.2f (%.1fx)", ob.AskWall.Price, ob.AskWall.Ratio))
+		}
+		parts = append(parts, "стакан: "+strings.Join(obParts, ", "))
+	}
+
+	// 10. Sentiment
+	if sent != nil && (sent.Score >= 0.3 || sent.Score <= -0.3) {
+		parts = append(parts, fmt.Sprintf("sentiment %+.1f (%s)", sent.Score, sent.Reason))
 	}
 
 	header := fmt.Sprintf("%s (%.2f): ", snap.Ticker, price)
