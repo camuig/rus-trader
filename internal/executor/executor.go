@@ -1,8 +1,10 @@
 package executor
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/camuig/rus-trader/internal/ai"
 	"github.com/camuig/rus-trader/internal/broker"
@@ -23,6 +25,10 @@ type Executor struct {
 	indicators map[string]indicators.Indicators
 	journal    *journal.Journal
 	features   map[string]string // ticker → current textual features
+	vectorStore interface {
+		SaveEntry(ctx context.Context, tradeID uint, ticker, features string) error
+		UpdateOutcome(tradeID uint, outcome string, pnl, holdHours float64) error
+	}
 }
 
 // SetIndicators passes current indicators map to executor for ATR-based SL sizing.
@@ -38,6 +44,14 @@ func (e *Executor) SetJournal(j *journal.Journal) {
 // SetFeatures sets current textual features for saving on BUY.
 func (e *Executor) SetFeatures(f map[string]string) {
 	e.features = f
+}
+
+// SetVectorStore sets the vector store for saving/updating pattern embeddings.
+func (e *Executor) SetVectorStore(vs interface {
+	SaveEntry(ctx context.Context, tradeID uint, ticker, features string) error
+	UpdateOutcome(tradeID uint, outcome string, pnl, holdHours float64) error
+}) {
+	e.vectorStore = vs
 }
 
 func NewExecutor(
@@ -267,6 +281,17 @@ func (e *Executor) executeBuy(d ai.AIDecision) {
 		e.logger.Error("save trade", "error", err)
 	}
 
+	// Save embedding for vector pattern memory
+	if e.vectorStore != nil && trade.EntryFeatures != "" {
+		go func(id uint, ticker, feats string) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := e.vectorStore.SaveEntry(ctx, id, ticker, feats); err != nil {
+				e.logger.Error("save pattern embedding", "ticker", ticker, "error", err)
+			}
+		}(trade.ID, trade.Ticker, trade.EntryFeatures)
+	}
+
 	e.notifier.NotifyBuy(d.Ticker, executedPrice, result.ExecutedLots, slPrice, tpPrice, d.Reasoning)
 	e.logger.Info("BUY executed",
 		"ticker", d.Ticker, "price", executedPrice, "lots", result.ExecutedLots,
@@ -346,6 +371,20 @@ func (e *Executor) executeSell(d ai.AIDecision) {
 	// Record trade outcome for journal
 	if e.journal != nil {
 		e.journal.RecordOutcome(openTrade, result.ExecutedPrice, pnl, d.Reasoning)
+	}
+
+	// Update vector pattern memory with outcome
+	if e.vectorStore != nil {
+		outcome := "loss"
+		if pnl > 0 {
+			outcome = "win"
+		} else if pnl == 0 {
+			outcome = "breakeven"
+		}
+		holdHours := time.Since(openTrade.CreatedAt).Hours()
+		if err := e.vectorStore.UpdateOutcome(openTrade.ID, outcome, pnl, holdHours); err != nil {
+			e.logger.Error("update pattern outcome", "ticker", d.Ticker, "error", err)
+		}
 	}
 
 	// Save sell trade record
