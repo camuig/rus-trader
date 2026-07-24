@@ -36,6 +36,43 @@
             </div>
         </div>
 
+        {{if gt .Metrics.ClosedTrades 0}}
+        <section>
+            <h2>Метрики</h2>
+            <div class="stats">
+                <div class="stat-card">
+                    <div class="stat-label">Profit Factor</div>
+                    <div class="stat-value {{if gt .Metrics.ProfitFactor 1.0}}positive{{else if gt .Metrics.ProfitFactor 0.0}}negative{{end}}">
+                        {{printf "%.2f" .Metrics.ProfitFactor}}
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Макс. просадка</div>
+                    <div class="stat-value negative">{{printf "%.2f" .Metrics.MaxDrawdownRub}} &#8381;</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Win Rate</div>
+                    <div class="stat-value">{{printf "%.1f" .Metrics.WinRate}}%</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Средний плюс / минус</div>
+                    <div class="stat-value">
+                        <span class="positive">{{printf "%+.2f" .Metrics.AvgWinRub}}</span> /
+                        <span class="negative">{{printf "%+.2f" .Metrics.AvgLossRub}}</span> &#8381;
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Проезд стопа</div>
+                    <div class="stat-value">{{printf "%.1f" .Metrics.AvgStopSlippagePct}}%</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Закрытых сделок</div>
+                    <div class="stat-value">{{.Metrics.ClosedTrades}}</div>
+                </div>
+            </div>
+        </section>
+        {{end}}
+
         {{if .OpenPositions}}
         <section>
             <h2>Открытые позиции ({{len .OpenPositions}})</h2>
@@ -55,7 +92,7 @@
                 <tbody>
                     {{range .OpenPositions}}
                     <tr>
-                        <td><strong>{{.Ticker}}</strong></td>
+                        <td><strong>{{.Ticker}}</strong>{{if .ManualSaleRequired}} <span class="badge-manual" title="Инструмент запрещён для торговли через API (код 30052) — бот не сможет закрыть позицию">⚠ ручная продажа</span>{{end}}</td>
                         <td>{{printf "%.2f" .Price}}</td>
                         <td>{{if gt .CurrentPrice 0.0}}{{printf "%.2f" .CurrentPrice}}{{else}}&mdash;{{end}}</td>
                         <td>{{.Quantity}}</td>
@@ -117,6 +154,40 @@
             <p class="empty">Сделок пока нет</p>
             {{end}}
         </section>
+
+        <div class="news-columns">
+            <section class="news-section">
+                <h2>Новости компаний (Финам)</h2>
+                {{if .News.FinamNews}}
+                <ul class="news-list">
+                    {{range .News.FinamNews}}
+                    <li>
+                        <span class="news-time">{{.Published.Format "02.01 15:04"}}</span>
+                        <span class="news-title">{{.Title}}</span>
+                    </li>
+                    {{end}}
+                </ul>
+                {{else}}
+                <p class="empty">Нет новостей</p>
+                {{end}}
+            </section>
+
+            <section class="news-section">
+                <h2>Мировые новости</h2>
+                {{if .News.WorldNews}}
+                <ul class="news-list">
+                    {{range .News.WorldNews}}
+                    <li>
+                        <span class="news-time">{{.Source}}</span>
+                        <span class="news-title">{{.Title}}</span>
+                    </li>
+                    {{end}}
+                </ul>
+                {{else}}
+                <p class="empty">Нет новостей</p>
+                {{end}}
+            </section>
+        </div>
     </div>
 </body>
 </html>

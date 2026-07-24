@@ -390,3 +390,16 @@ func (r *Repository) GetBuyTradeForSell(ticker string) (*Trade, error) {
 	}
 	return &trade, nil
 }
+
+// Dashboard Metrics
+
+// GetDashboardMetrics возвращает агрегированные торговые метрики (profit factor,
+// просадка, win rate и т.д.) по всем закрытым сделкам в хронологическом порядке.
+func (r *Repository) GetDashboardMetrics() (DashboardMetrics, error) {
+	var trades []Trade
+	err := r.db.Where("status = ?", "closed").Order("created_at ASC").Find(&trades).Error
+	if err != nil {
+		return DashboardMetrics{}, err
+	}
+	return ComputeDashboardMetrics(trades), nil
+}

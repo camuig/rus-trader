@@ -43,7 +43,8 @@ func (s *Scheduler) applyGuardAndExecute(state *cycleState) {
 		s.updateTrailingStops(state.portfolio)
 	}
 
-	// Execute
+	// Execute (снапшот портфеля нужен для sanity-check qty в executeSell)
+	s.executor.SetPortfolio(state.portfolio)
 	s.executor.Execute(allowedDecisions)
 
 	// Save logs + snapshots

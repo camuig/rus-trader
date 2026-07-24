@@ -54,6 +54,9 @@ func (bc *BrokerClient) FetchCandleSnapshots(tickers []string, concurrency int) 
 				bc.Logger.Error("fetch candles", "ticker", t, "error", err)
 				return
 			}
+			if snap == nil {
+				return
+			}
 
 			mu.Lock()
 			results = append(results, *snap)

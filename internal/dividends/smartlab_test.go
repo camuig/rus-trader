@@ -96,10 +96,10 @@ func TestFilterByLookahead(t *testing.T) {
 	now := time.Now()
 
 	divs := map[string]DividendInfo{
-		"NEAR": {Ticker: "NEAR", ExDivDate: now.AddDate(0, 0, 10)},  // через 10 дней
-		"FAR":  {Ticker: "FAR", ExDivDate: now.AddDate(0, 0, 60)},   // через 60 дней
-		"PAST": {Ticker: "PAST", ExDivDate: now.AddDate(0, 0, -5)},  // 5 дней назад
-		"NONE": {Ticker: "NONE", ExDivDate: time.Time{}},            // нет даты
+		"NEAR": {Ticker: "NEAR", ExDivDate: now.AddDate(0, 0, 10)}, // через 10 дней
+		"FAR":  {Ticker: "FAR", ExDivDate: now.AddDate(0, 0, 60)},  // через 60 дней
+		"PAST": {Ticker: "PAST", ExDivDate: now.AddDate(0, 0, -5)}, // 5 дней назад
+		"NONE": {Ticker: "NONE", ExDivDate: time.Time{}},           // нет даты
 	}
 
 	result := FilterByLookahead(divs, 30)

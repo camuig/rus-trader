@@ -7,16 +7,16 @@ type Trade struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 
-	Ticker    string  `gorm:"index;not null" json:"ticker"`
-	Action    string  `gorm:"not null" json:"action"` // BUY or SELL
-	Price     float64 `gorm:"not null" json:"price"`
-	Quantity  int64   `gorm:"not null" json:"quantity"`
-	OrderID   string  `json:"order_id"`
+	Ticker   string  `gorm:"index;not null" json:"ticker"`
+	Action   string  `gorm:"not null" json:"action"` // BUY or SELL
+	Price    float64 `gorm:"not null" json:"price"`
+	Quantity int64   `gorm:"not null" json:"quantity"`
+	OrderID  string  `json:"order_id"`
 
-	StopLossPrice   float64 `json:"stop_loss_price"`
-	TakeProfitPrice float64 `json:"take_profit_price"`
-	StopLossOrderID string  `json:"stop_loss_order_id"`
-	TakeProfitOrderID string `json:"take_profit_order_id"`
+	StopLossPrice     float64 `json:"stop_loss_price"`
+	TakeProfitPrice   float64 `json:"take_profit_price"`
+	StopLossOrderID   string  `json:"stop_loss_order_id"`
+	TakeProfitOrderID string  `json:"take_profit_order_id"`
 
 	PnL           float64 `gorm:"column:pnl" json:"pnl"`
 	Reasoning     string  `gorm:"type:text" json:"reasoning"`

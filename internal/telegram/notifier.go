@@ -11,10 +11,10 @@ import (
 )
 
 type Notifier struct {
-	bot    *tgbotapi.BotAPI
-	chatID int64
+	bot     *tgbotapi.BotAPI
+	chatID  int64
 	enabled bool
-	logger *logger.Logger
+	logger  *logger.Logger
 }
 
 func NewNotifier(cfg *config.Config, log *logger.Logger) *Notifier {

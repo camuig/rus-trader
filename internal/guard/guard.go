@@ -23,18 +23,28 @@ type TradeGuard struct {
 	logger     *logger.Logger
 	indicators map[string]indicators.Indicators // ticker -> indicators
 	loc        *time.Location                   // MSK timezone
+
+	// lotSizeFn возвращает размер лота по тикеру (для перевода Trade.Quantity из лотов
+	// в акции при расчёте риска). nil или ошибка резолва → считаем лот = 1.
+	lotSizeFn func(ticker string) int64
 }
 
 type filterState struct {
-	openPositionsKnown bool
-	openPositions      int
-	dailyBuysKnown     bool
-	dailyBuys          int
-	openTickersKnown   bool
-	openTickers        map[string]struct{}
-	sellClosable       map[string]struct{}
-	soldThisCycle      map[string]struct{}
-	boughtThisCycle    map[string]struct{}
+	openPositionsKnown   bool
+	openPositions        int
+	dailyBuysKnown       bool
+	dailyBuys            int
+	openTickersKnown     bool
+	openTickers          map[string]struct{}
+	sellClosable         map[string]struct{}
+	soldThisCycle        map[string]struct{}
+	boughtThisCycle      map[string]struct{}
+	dailyPnL             float64
+	dailyPnLKnown        bool
+	recentLossTickers    map[string]struct{}
+	losingStreakByTicker map[string]int
+	openRiskKnown        bool
+	openRiskRub          float64 // Σ(вход−SL)×акций по открытым позициям
 }
 
 func NewTradeGuard(repo *storage.Repository, cfg *config.Config, log *logger.Logger) *TradeGuard {
@@ -50,6 +60,11 @@ func NewTradeGuard(repo *storage.Repository, cfg *config.Config, log *logger.Log
 // SetIndicators sets technical indicators for use in pre-validation.
 func (g *TradeGuard) SetIndicators(ind map[string]indicators.Indicators) {
 	g.indicators = ind
+}
+
+// SetLotSizeFn задаёт lookup размера лота по тикеру (см. TradeGuard.lotSizeFn).
+func (g *TradeGuard) SetLotSizeFn(fn func(ticker string) int64) {
+	g.lotSizeFn = fn
 }
 
 func (g *TradeGuard) Filter(decisions []ai.AIDecision) (allowed, blocked []BlockedDecision) {
@@ -128,14 +143,48 @@ func (g *TradeGuard) checkBuy(d ai.AIDecision, state *filterState) string {
 		return fmt.Sprintf("лимит сделок за день (%d/%d)", state.dailyBuys, cfg.MaxDailyTrades)
 	}
 
-	// 4. Pre-validation: RSI overbought check
+	// 4. Circuit breaker: max daily loss
+	if cfg.MaxDailyLossRub > 0 && state.dailyPnLKnown && state.dailyPnL < -cfg.MaxDailyLossRub {
+		return fmt.Sprintf("circuit breaker: дневной убыток %.0f ₽ превышает лимит -%.0f ₽", state.dailyPnL, cfg.MaxDailyLossRub)
+	}
+
+	// 5. Recent loss cooldown: block tickers with losses in last N days
+	if _, recentLoss := state.recentLossTickers[d.Ticker]; recentLoss {
+		return fmt.Sprintf("тикер %s был убыточным в последние %d дн.", d.Ticker, cfg.RecentLossCooldownDays)
+	}
+
+	// 5b. Per-ticker losing streak within configured time window
+	if cfg.MaxLosingStreakPerTicker > 0 {
+		if streak, ok := state.losingStreakByTicker[d.Ticker]; ok && streak >= cfg.MaxLosingStreakPerTicker {
+			window := cfg.LosingStreakWindowDays
+			if window > 0 {
+				return fmt.Sprintf("тикер %s: %d убыточных сделок подряд за %d дн. (лимит %d)", d.Ticker, streak, window, cfg.MaxLosingStreakPerTicker)
+			}
+			return fmt.Sprintf("тикер %s: %d убыточных сделок подряд (лимит %d)", d.Ticker, streak, cfg.MaxLosingStreakPerTicker)
+		}
+	}
+
+	// 6. Pre-validation: RSI overbought check
 	if ind, ok := g.indicators[d.Ticker]; ok {
 		if ind.RSI14 > 80 {
 			return fmt.Sprintf("RSI перекуплен (%.1f > 80)", ind.RSI14)
 		}
+
+		// Block BUY against downtrend (EMA9 < EMA21)
+		if cfg.RequireUptrend && ind.EMA9 > 0 && ind.EMA21 > 0 && ind.EMA9 < ind.EMA21 {
+			return fmt.Sprintf("нисходящий тренд (EMA9=%.2f < EMA21=%.2f)", ind.EMA9, ind.EMA21)
+		}
+
+		// Block BUY when ATR too low (insufficient volatility for targets)
+		if cfg.MinATRPct > 0 && ind.ATR14 > 0 && ind.EMA21 > 0 {
+			atrPct := ind.ATR14 / ind.EMA21 * 100
+			if atrPct < cfg.MinATRPct {
+				return fmt.Sprintf("ATR слишком низкий (%.2f%% < %.1f%%)", atrPct, cfg.MinATRPct)
+			}
+		}
 	}
 
-	// 5. Pre-validation: no BUY in last hour of trading
+	// 7. Pre-validation: no BUY in last hour of trading
 	if cfg.NoLastHourBuy {
 		now := time.Now().In(g.loc)
 		totalMinutes := now.Hour()*60 + now.Minute()
@@ -144,7 +193,69 @@ func (g *TradeGuard) checkBuy(d ai.AIDecision, state *filterState) string {
 		}
 	}
 
+	// 8. Лимит совокупного риска портфеля: Σ(вход−SL)×акций по открытым позициям
+	// плюс оценка риска нового входа не должны превышать max_portfolio_risk_rub.
+	if cfg.MaxPortfolioRiskRub > 0 && state.openRiskKnown {
+		newRisk := g.estimateNewTradeRisk(d)
+		if state.openRiskRub+newRisk > cfg.MaxPortfolioRiskRub {
+			return fmt.Sprintf("лимит совокупного риска портфеля (открыто %.0f ₽ + новый %.0f ₽ > %.0f ₽)",
+				state.openRiskRub, newRisk, cfg.MaxPortfolioRiskRub)
+		}
+		// Это последняя проверка: раз решение проходит, учитываем его риск для
+		// последующих BUY этого же цикла.
+		state.openRiskRub += newRisk
+	}
+
 	return ""
+}
+
+// estimateNewTradeRisk оценивает рублёвый риск нового BUY: размер позиции
+// (с масштабированием по confidence, как в executor) × SL-дистанция в процентах.
+// Точной цены входа ещё нет — прокси служит EMA9; без неё берётся дефолтный SL%.
+func (g *TradeGuard) estimateNewTradeRisk(d ai.AIDecision) float64 {
+	cfg := g.config.Trading
+
+	posRub := cfg.MaxPositionRub
+	switch {
+	case d.Confidence >= 90:
+	case d.Confidence >= 80:
+		posRub *= 0.75
+	default:
+		posRub *= 0.50
+	}
+
+	slPct := cfg.DefaultStopLossPct
+	if ind, ok := g.indicators[d.Ticker]; ok && ind.EMA9 > 0 && d.StopLoss > 0 && d.StopLoss < ind.EMA9 {
+		slPct = (ind.EMA9 - d.StopLoss) / ind.EMA9 * 100
+	}
+	// Те же границы, что применит executor: floor min_stop_loss_pct, кэп 6%.
+	if slPct < cfg.MinStopLossPct {
+		slPct = cfg.MinStopLossPct
+	}
+	if slPct > 6.0 {
+		slPct = 6.0
+	}
+
+	return posRub * slPct / 100
+}
+
+// openPortfolioRisk суммирует рублёвый риск открытых позиций: (вход−SL)×акций.
+// Позиции без SL или с SL выше входа риском не считаются (их закроет вотчдог/reconcile).
+func openPortfolioRisk(trades []storage.Trade, lotSizeFn func(string) int64) float64 {
+	var total float64
+	for _, t := range trades {
+		if t.StopLossPrice <= 0 || t.Price <= t.StopLossPrice {
+			continue
+		}
+		lotSize := int64(1)
+		if lotSizeFn != nil {
+			if ls := lotSizeFn(t.Ticker); ls > 0 {
+				lotSize = ls
+			}
+		}
+		total += (t.Price - t.StopLossPrice) * float64(t.Quantity*lotSize)
+	}
+	return total
 }
 
 func (g *TradeGuard) checkSell(d ai.AIDecision, state *filterState) string {
@@ -192,10 +303,11 @@ func actionPriority(action string) int {
 
 func (g *TradeGuard) loadFilterState() filterState {
 	state := filterState{
-		openTickers:     make(map[string]struct{}),
-		sellClosable:    make(map[string]struct{}),
-		soldThisCycle:   make(map[string]struct{}),
-		boughtThisCycle: make(map[string]struct{}),
+		openTickers:       make(map[string]struct{}),
+		sellClosable:      make(map[string]struct{}),
+		soldThisCycle:     make(map[string]struct{}),
+		boughtThisCycle:   make(map[string]struct{}),
+		recentLossTickers: make(map[string]struct{}),
 	}
 
 	if openTrades, err := g.repo.GetOpenTrades(); err == nil {
@@ -205,6 +317,8 @@ func (g *TradeGuard) loadFilterState() filterState {
 		for _, t := range openTrades {
 			state.openTickers[t.Ticker] = struct{}{}
 		}
+		state.openRiskKnown = true
+		state.openRiskRub = openPortfolioRisk(openTrades, g.lotSizeFn)
 	} else if openCount, err := g.repo.CountOpenPositions(); err == nil {
 		state.openPositionsKnown = true
 		state.openPositions = openCount
@@ -217,6 +331,35 @@ func (g *TradeGuard) loadFilterState() filterState {
 		state.dailyBuys = dailyCount
 	} else {
 		g.logger.Error("load daily trades count for guard", "error", err)
+	}
+
+	// Circuit breaker: load today's P&L
+	if pnl, err := g.repo.GetTodayPnL(); err == nil {
+		state.dailyPnL = pnl
+		state.dailyPnLKnown = true
+	} else {
+		g.logger.Error("load daily pnl for guard", "error", err)
+	}
+
+	// Recent loss tickers
+	if days := g.config.Trading.RecentLossCooldownDays; days > 0 {
+		if tickers, err := g.repo.GetRecentLossTickers(days); err == nil {
+			for _, t := range tickers {
+				state.recentLossTickers[t] = struct{}{}
+			}
+		} else {
+			g.logger.Error("load recent loss tickers for guard", "error", err)
+		}
+	}
+
+	// Per-ticker losing streak (within configurable window — prevents permanent blocks)
+	if minStreak := g.config.Trading.MaxLosingStreakPerTicker; minStreak > 0 {
+		window := g.config.Trading.LosingStreakWindowDays
+		if streaks, err := g.repo.GetLosingStreakTickers(minStreak, window); err == nil {
+			state.losingStreakByTicker = streaks
+		} else {
+			g.logger.Error("load losing streak tickers for guard", "error", err)
+		}
 	}
 
 	return state

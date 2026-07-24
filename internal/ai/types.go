@@ -58,11 +58,11 @@ type PerformanceStats struct {
 
 // MarketContext describes broad market regime for the AI prompt.
 type MarketContext struct {
-	IndexTicker  string  // e.g. "IMOEX"
-	ChangePct1d  float64 // % change over 1 day
-	ChangePct3d  float64 // % change over 3 days
-	ChangePct1w  float64 // % change over 1 week
-	Regime       string  // "uptrend", "downtrend", "range", "unknown"
+	IndexTicker string  // e.g. "IMOEX"
+	ChangePct1d float64 // % change over 1 day
+	ChangePct3d float64 // % change over 3 days
+	ChangePct1w float64 // % change over 1 week
+	Regime      string  // "uptrend", "downtrend", "range", "unknown"
 }
 
 type AnalysisRequest struct {
@@ -98,11 +98,11 @@ type AIDecision struct {
 
 // ScreeningRequest is input for the Screening Agent (BUY candidates only).
 type ScreeningRequest struct {
-	TickerFeatures  []string            // textual features per ticker
+	TickerFeatures  []string // textual features per ticker
 	Market          MarketContext
 	GlobalNews      []string
 	TickerNews      map[string][]string
-	Lessons         []string            // formatted lesson lines
+	Lessons         []string // formatted lesson lines
 	TodayTraded     []string
 	Stats           PerformanceStats
 	CurrentTime     time.Time
@@ -122,7 +122,7 @@ type PositionContext struct {
 	TakeProfit   float64
 	ProgressToTP float64
 	Hypothesis   string
-	Features     string   // current textual features
+	Features     string // current textual features
 	News         []string
 }
 

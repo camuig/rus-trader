@@ -26,10 +26,10 @@ func containsAny(s string, substrs ...string) bool {
 // snap создаёт тестовый CandleSnapshot с заданными параметрами.
 func snap(ticker string, price float64, ind indicators.Indicators) broker.CandleSnapshot {
 	return broker.CandleSnapshot{
-		Ticker:    ticker,
-		LastPrice: price,
-		Period1d:  broker.PeriodOHLCV{Open: price * 0.99, High: price * 1.01, Low: price * 0.98, Close: price, Volume: 1e6},
-		Period3d:  broker.PeriodOHLCV{Open: price * 0.97, High: price * 1.02, Low: price * 0.96, Close: price, Volume: 3e6},
+		Ticker:     ticker,
+		LastPrice:  price,
+		Period1d:   broker.PeriodOHLCV{Open: price * 0.99, High: price * 1.01, Low: price * 0.98, Close: price, Volume: 1e6},
+		Period3d:   broker.PeriodOHLCV{Open: price * 0.97, High: price * 1.02, Low: price * 0.96, Close: price, Volume: 3e6},
 		Indicators: ind,
 	}
 }

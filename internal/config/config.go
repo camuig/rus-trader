@@ -41,35 +41,39 @@ type DeepSeekConfig struct {
 }
 
 type TradingConfig struct {
-	Interval             string  `yaml:"interval"`
-	MaxPositionRub       float64 `yaml:"max_position_rub"`
-	MinConfidence        int     `yaml:"min_confidence"`
-	DefaultStopLossPct   float64 `yaml:"default_stop_loss_pct"`
-	DefaultTakeProfitPct float64 `yaml:"default_take_profit_pct"`
-	CandleConcurrency    int     `yaml:"candle_concurrency"`
-	CooldownMinutes      int     `yaml:"cooldown_minutes"`
-	MinHoldMinutes       int     `yaml:"min_hold_minutes"`
-	MaxOpenPositions     int     `yaml:"max_open_positions"`
-	MaxDailyTrades       int     `yaml:"max_daily_trades"`
-	MaxAnalysisTickers   int     `yaml:"max_analysis_tickers"`
-	CommissionPct        float64 `yaml:"commission_pct"`
-	MaxSpreadPct         float64 `yaml:"max_spread_pct"`         // max bid/ask spread %, 0=disabled
-	TrailingStopEnabled  bool    `yaml:"trailing_stop_enabled"`   // enable trailing stop
-	TrailingBreakevenPct float64 `yaml:"trailing_breakeven_pct"`  // % to TP to move SL to breakeven
-	TrailingLockProfitPct float64 `yaml:"trailing_lock_profit_pct"` // % to TP to lock 50% profit
-	LimitOrderSlippage   float64 `yaml:"limit_order_slippage"`    // % slippage for limit orders, 0=market
-	NoLastHourBuy        bool    `yaml:"no_last_hour_buy"`        // block BUY after 17:50 MSK
-	MinStopLossPct            float64 `yaml:"min_stop_loss_pct"`              // minimum SL distance from entry (%)
-	ATRStopLossMultiplier     float64 `yaml:"atr_sl_multiplier"`              // SL floor = max(min_stop_loss_pct, mult*ATR/price*100)
-	MinTakeProfitPct          float64 `yaml:"min_take_profit_pct"`            // minimum TP distance from entry (%)
-	MinRiskRewardRatio        float64 `yaml:"min_risk_reward_ratio"`          // minimum TP/SL ratio (e.g. 1.5)
-	RequireUptrend            bool    `yaml:"require_uptrend"`                // block BUY when EMA9 < EMA21
-	MaxDailyLossRub           float64 `yaml:"max_daily_loss_rub"`             // circuit breaker: max daily loss (RUB), 0=disabled
-	MinScreenerScore          float64 `yaml:"min_screener_score"`             // minimum screener score to include ticker (0=disabled)
-	MinATRPct                 float64 `yaml:"min_atr_pct"`                    // minimum ATR/price % to allow BUY, 0=disabled
-	RecentLossCooldownDays    int     `yaml:"recent_loss_cooldown_days"`      // block BUY on tickers with losses in last N days, 0=disabled
-	MaxLosingStreakPerTicker  int     `yaml:"max_losing_streak_per_ticker"`   // block BUY after N consecutive losing trades on same ticker, 0=disabled
-	LosingStreakWindowDays    int     `yaml:"losing_streak_window_days"`      // only consider streaks within the last N days, 0=unlimited
+	Interval                 string  `yaml:"interval"`
+	MaxPositionRub           float64 `yaml:"max_position_rub"`
+	MinConfidence            int     `yaml:"min_confidence"`
+	DefaultStopLossPct       float64 `yaml:"default_stop_loss_pct"`
+	DefaultTakeProfitPct     float64 `yaml:"default_take_profit_pct"`
+	CandleConcurrency        int     `yaml:"candle_concurrency"`
+	CooldownMinutes          int     `yaml:"cooldown_minutes"`
+	MinHoldMinutes           int     `yaml:"min_hold_minutes"`
+	MaxOpenPositions         int     `yaml:"max_open_positions"`
+	MaxDailyTrades           int     `yaml:"max_daily_trades"`
+	MaxAnalysisTickers       int     `yaml:"max_analysis_tickers"`
+	CandidatePoolSize        int     `yaml:"candidate_pool_size"` // сколько тикеров считать индикаторы до пре-фильтра (0=auto: MaxAnalysisTickers*3)
+	CommissionPct            float64 `yaml:"commission_pct"`
+	MaxSpreadPct             float64 `yaml:"max_spread_pct"`               // max bid/ask spread %, 0=disabled
+	TrailingStopEnabled      bool    `yaml:"trailing_stop_enabled"`        // enable trailing stop
+	TrailingBreakevenPct     float64 `yaml:"trailing_breakeven_pct"`       // % to TP to move SL to breakeven
+	TrailingLockProfitPct    float64 `yaml:"trailing_lock_profit_pct"`     // % to TP to lock 50% profit
+	LimitOrderSlippage       float64 `yaml:"limit_order_slippage"`         // % slippage for limit orders, 0=market
+	NoLastHourBuy            bool    `yaml:"no_last_hour_buy"`             // block BUY after 17:50 MSK
+	MinStopLossPct           float64 `yaml:"min_stop_loss_pct"`            // minimum SL distance from entry (%)
+	ATRStopLossMultiplier    float64 `yaml:"atr_sl_multiplier"`            // SL floor = max(min_stop_loss_pct, mult*ATR/price*100)
+	MinTakeProfitPct         float64 `yaml:"min_take_profit_pct"`          // minimum TP distance from entry (%)
+	MinRiskRewardRatio       float64 `yaml:"min_risk_reward_ratio"`        // minimum TP/SL ratio (e.g. 1.5)
+	RequireUptrend           bool    `yaml:"require_uptrend"`              // block BUY when EMA9 < EMA21
+	MaxDailyLossRub          float64 `yaml:"max_daily_loss_rub"`           // circuit breaker: max daily loss (RUB), 0=disabled
+	MinScreenerScore         float64 `yaml:"min_screener_score"`           // minimum screener score to include ticker (0=disabled)
+	MinATRPct                float64 `yaml:"min_atr_pct"`                  // minimum ATR/price % to allow BUY, 0=disabled
+	RecentLossCooldownDays   int     `yaml:"recent_loss_cooldown_days"`    // block BUY on tickers with losses in last N days, 0=disabled
+	MaxLosingStreakPerTicker int     `yaml:"max_losing_streak_per_ticker"` // block BUY after N consecutive losing trades on same ticker, 0=disabled
+	LosingStreakWindowDays   int     `yaml:"losing_streak_window_days"`    // only consider streaks within the last N days, 0=unlimited
+	StopWatchdogInterval     string  `yaml:"stop_watchdog_interval"`       // fast SL/TP watchdog loop interval ("0" = disabled)
+	MaxPriceDeviationPct     float64 `yaml:"max_price_deviation_pct"`      // quotes deviating more than this % are treated as bad data
+	MaxPortfolioRiskRub      float64 `yaml:"max_portfolio_risk_rub"`       // cap on total open risk Σ(entry−SL)×qty, 0=disabled
 }
 
 type TelegramConfig struct {
@@ -197,10 +201,14 @@ func setDefaults(cfg *Config) {
 		cfg.Trading.CandleConcurrency = 10
 	}
 	if cfg.Trading.CooldownMinutes == 0 {
-		cfg.Trading.CooldownMinutes = 1440
+		// 5 суток: по статистике повторные входы в тот же тикер в течение
+		// нескольких дней после продажи стабильно убыточны (churn).
+		cfg.Trading.CooldownMinutes = 7200
 	}
 	if cfg.Trading.MinHoldMinutes == 0 {
-		cfg.Trading.MinHoldMinutes = 60
+		// Свинг-горизонт: удержания <4 часов давали winrate 13%.
+		// Вотчдог SL/TP это ограничение не затрагивает — только решения AI.
+		cfg.Trading.MinHoldMinutes = 240
 	}
 	if cfg.Trading.MaxOpenPositions == 0 {
 		cfg.Trading.MaxOpenPositions = 5
@@ -210,6 +218,9 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.Trading.MaxAnalysisTickers == 0 {
 		cfg.Trading.MaxAnalysisTickers = 20
+	}
+	if cfg.Trading.CandidatePoolSize == 0 {
+		cfg.Trading.CandidatePoolSize = cfg.Trading.MaxAnalysisTickers * 3
 	}
 	if cfg.Trading.CommissionPct == 0 {
 		cfg.Trading.CommissionPct = 0.025
@@ -255,6 +266,15 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.Trading.LosingStreakWindowDays == 0 {
 		cfg.Trading.LosingStreakWindowDays = 7
+	}
+	if cfg.Trading.StopWatchdogInterval == "" {
+		cfg.Trading.StopWatchdogInterval = "2m"
+	}
+	if cfg.Trading.MaxPriceDeviationPct == 0 {
+		cfg.Trading.MaxPriceDeviationPct = 30
+	}
+	if cfg.Trading.MaxPortfolioRiskRub == 0 {
+		cfg.Trading.MaxPortfolioRiskRub = 2000
 	}
 	if cfg.Web.Port == 0 {
 		cfg.Web.Port = 8080
@@ -328,6 +348,9 @@ func (c *Config) Validate() error {
 	if _, err := time.ParseDuration(c.Trading.Interval); err != nil {
 		return fmt.Errorf("invalid trading.interval %q: %w", c.Trading.Interval, err)
 	}
+	if _, err := time.ParseDuration(c.Trading.StopWatchdogInterval); err != nil {
+		return fmt.Errorf("invalid trading.stop_watchdog_interval %q: %w", c.Trading.StopWatchdogInterval, err)
+	}
 	if c.Telegram.Enabled {
 		if c.Telegram.BotToken == "" {
 			return fmt.Errorf("telegram.bot_token is required when telegram is enabled")
@@ -353,6 +376,16 @@ func (c *Config) MOEXLocation() *time.Location {
 
 func (c *Config) TradingInterval() time.Duration {
 	d, _ := time.ParseDuration(c.Trading.Interval)
+	return d
+}
+
+// StopWatchdogInterval возвращает интервал быстрого цикла контроля SL/TP.
+// 0 (или невалидное значение) означает, что вотчдог выключен.
+func (c *Config) StopWatchdogInterval() time.Duration {
+	d, err := time.ParseDuration(c.Trading.StopWatchdogInterval)
+	if err != nil {
+		return 0
+	}
 	return d
 }
 

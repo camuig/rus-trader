@@ -142,7 +142,7 @@ func (d *DeepSeekClient) ScreeningAnalyze(ctx context.Context, req *ScreeningReq
 	d.logger.Info("screening agent prompt built",
 		"chars", len([]rune(userPrompt)), "tickers", len(req.TickerFeatures))
 
-	rawResponse, err := d.callLLM(ctx, screeningSystemPrompt, userPrompt, d.model, d.cfg.DeepSeek.TimeoutSeconds)
+	rawResponse, err := d.callLLM(ctx, ScreeningSystemPrompt(d.cfg.Trading), userPrompt, d.model, d.cfg.DeepSeek.TimeoutSeconds)
 	if err != nil {
 		return nil, "", fmt.Errorf("screening agent: %w", err)
 	}

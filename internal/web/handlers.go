@@ -1,24 +1,32 @@
 package web
 
 import (
+	"context"
 	"html/template"
 	"net/http"
 	"time"
 
+	"github.com/camuig/rus-trader/internal/moex"
 	"github.com/camuig/rus-trader/internal/storage"
 )
 
+type NewsSection struct {
+	FinamNews []moex.NewsItem
+	WorldNews []moex.NewsItem
+}
+
 type OpenPosition struct {
-	Ticker          string
-	Price           float64
-	Quantity        int64
-	StopLossPrice   float64
-	TakeProfitPrice float64
-	CreatedAt       time.Time
-	CurrentPrice    float64
-	PnL             float64
-	PnLPercent      float64
-	Reasoning       string
+	Ticker             string
+	Price              float64
+	Quantity           int64
+	StopLossPrice      float64
+	TakeProfitPrice    float64
+	CreatedAt          time.Time
+	CurrentPrice       float64
+	PnL                float64
+	PnLPercent         float64
+	Reasoning          string
+	ManualSaleRequired bool
 }
 
 type DashboardData struct {
@@ -30,6 +38,8 @@ type DashboardData struct {
 	RecentTrades   []storage.Trade
 	PositionsCount int
 	Mode           string
+	News           NewsSection
+	Metrics        storage.DashboardMetrics
 }
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
@@ -66,11 +76,34 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		data.RecentTrades = trades
 	}
 
+	// Get trading metrics (profit factor, drawdown, проезд стопа и т.д.)
+	if metrics, err := s.repo.GetDashboardMetrics(); err == nil {
+		data.Metrics = metrics
+	} else {
+		s.logger.Error("get dashboard metrics", "error", err)
+	}
+
 	// Mode
 	if s.config.IsSandbox() {
 		data.Mode = "SANDBOX"
 	} else {
 		data.Mode = "LIVE"
+	}
+
+	// Fetch news
+	newsCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	if finamNews, err := s.moex.FetchFinamNews(newsCtx, 20); err == nil {
+		data.News.FinamNews = finamNews
+	} else {
+		s.logger.Error("fetch finam news for dashboard", "error", err)
+	}
+
+	if worldNews, err := s.moex.FetchWorldNews(newsCtx, 20); err == nil {
+		data.News.WorldNews = worldNews
+	} else {
+		s.logger.Error("fetch world news for dashboard", "error", err)
 	}
 
 	tmpl, err := template.ParseFiles("templates/dashboard.html")
@@ -89,8 +122,9 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 func (s *Server) enrichPositions(trades []storage.Trade) []OpenPosition {
 	// Build a map of ticker -> live position data from broker
 	type liveData struct {
-		CurrentPrice float64
-		PnL          float64
+		CurrentPrice       float64
+		Shares             float64
+		ManualSaleRequired bool
 	}
 	liveMap := make(map[string]liveData)
 
@@ -101,8 +135,9 @@ func (s *Server) enrichPositions(trades []storage.Trade) []OpenPosition {
 		for _, pos := range portfolio.Positions {
 			if pos.Ticker != "" {
 				liveMap[pos.Ticker] = liveData{
-					CurrentPrice: pos.CurrentPrice,
-					PnL:          pos.PnL,
+					CurrentPrice:       pos.CurrentPrice,
+					Shares:             pos.Quantity,
+					ManualSaleRequired: pos.ManualSaleRequired,
 				}
 			}
 		}
@@ -121,7 +156,10 @@ func (s *Server) enrichPositions(trades []storage.Trade) []OpenPosition {
 		}
 		if live, ok := liveMap[t.Ticker]; ok {
 			op.CurrentPrice = live.CurrentPrice
-			op.PnL = live.CurrentPrice*float64(t.Quantity) - t.Price*float64(t.Quantity)
+			op.ManualSaleRequired = live.ManualSaleRequired
+			// PnL считаем по количеству акций из портфеля: Trade.Quantity — в лотах,
+			// и для бумаг с лотом >1 акции умножение на лоты занижает результат.
+			op.PnL = (live.CurrentPrice - t.Price) * live.Shares
 			if t.Price > 0 {
 				op.PnLPercent = (live.CurrentPrice - t.Price) / t.Price * 100
 			}

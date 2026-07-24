@@ -16,14 +16,14 @@ func (bc *BrokerClient) PlaceStopLoss(instrumentID string, lots int64, stopPrice
 
 	stopOrders := bc.Client.NewStopOrdersServiceClient()
 	resp, err := stopOrders.PostStopOrder(&investgo.PostStopOrderRequest{
-		InstrumentId:  instrumentID,
-		Quantity:      lots,
-		StopPrice:     floatToSimpleQuotation(stopPrice),
-		Direction:     pb.StopOrderDirection_STOP_ORDER_DIRECTION_SELL,
-		AccountId:     bc.AccountID(),
+		InstrumentId:   instrumentID,
+		Quantity:       lots,
+		StopPrice:      floatToSimpleQuotation(stopPrice),
+		Direction:      pb.StopOrderDirection_STOP_ORDER_DIRECTION_SELL,
+		AccountId:      bc.AccountID(),
 		ExpirationType: pb.StopOrderExpirationType_STOP_ORDER_EXPIRATION_TYPE_GOOD_TILL_CANCEL,
-		StopOrderType: pb.StopOrderType_STOP_ORDER_TYPE_STOP_LOSS,
-		OrderID:       investgo.CreateUid(),
+		StopOrderType:  pb.StopOrderType_STOP_ORDER_TYPE_STOP_LOSS,
+		OrderID:        investgo.CreateUid(),
 	})
 	if err != nil {
 		return "", fmt.Errorf("place stop loss: %w", err)
@@ -40,14 +40,14 @@ func (bc *BrokerClient) PlaceTakeProfit(instrumentID string, lots int64, targetP
 
 	stopOrders := bc.Client.NewStopOrdersServiceClient()
 	resp, err := stopOrders.PostStopOrder(&investgo.PostStopOrderRequest{
-		InstrumentId:  instrumentID,
-		Quantity:      lots,
-		StopPrice:     floatToSimpleQuotation(targetPrice),
-		Direction:     pb.StopOrderDirection_STOP_ORDER_DIRECTION_SELL,
-		AccountId:     bc.AccountID(),
+		InstrumentId:   instrumentID,
+		Quantity:       lots,
+		StopPrice:      floatToSimpleQuotation(targetPrice),
+		Direction:      pb.StopOrderDirection_STOP_ORDER_DIRECTION_SELL,
+		AccountId:      bc.AccountID(),
 		ExpirationType: pb.StopOrderExpirationType_STOP_ORDER_EXPIRATION_TYPE_GOOD_TILL_CANCEL,
-		StopOrderType: pb.StopOrderType_STOP_ORDER_TYPE_TAKE_PROFIT,
-		OrderID:       investgo.CreateUid(),
+		StopOrderType:  pb.StopOrderType_STOP_ORDER_TYPE_TAKE_PROFIT,
+		OrderID:        investgo.CreateUid(),
 	})
 	if err != nil {
 		return "", fmt.Errorf("place take profit: %w", err)

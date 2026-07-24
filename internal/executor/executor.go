@@ -17,19 +17,37 @@ import (
 )
 
 type Executor struct {
-	broker     *broker.BrokerClient
-	repo       *storage.Repository
-	notifier   *telegram.Notifier
-	config     *config.Config
-	logger     *logger.Logger
-	indicators map[string]indicators.Indicators
-	journal    *journal.Journal
-	features   map[string]string // ticker → current textual features
+	broker      *broker.BrokerClient
+	repo        *storage.Repository
+	notifier    *telegram.Notifier
+	config      *config.Config
+	logger      *logger.Logger
+	indicators  map[string]indicators.Indicators
+	journal     *journal.Journal
+	features    map[string]string // ticker → current textual features
 	vectorStore interface {
 		SaveEntry(ctx context.Context, tradeID uint, ticker, features string) error
 		UpdateOutcome(tradeID uint, outcome string, pnl, holdHours float64) error
 	}
+
+	// SELL-cooldown: после неудачной попытки SELL по тикеру не повторять её какое-то время.
+	// Защищает от спама notify при precondition-ошибках брокера (см. T-Invest 90001).
+	failedSellAt map[string]time.Time
+
+	// Тикеры, по которым уже отправили уведомление о недоступности торговли через API
+	// (T-Invest 30052). Чтобы не спамить телегу одинаковой ошибкой каждый цикл —
+	// уведомляем один раз на тикер за жизнь процесса.
+	apiForbiddenNotified map[string]bool
+
+	// Снимок портфеля от брокера для текущего цикла — используется как sanity-check
+	// quantity перед SELL (сравнение БД ↔ реальная позиция).
+	currentPortfolio *broker.PortfolioInfo
 }
+
+// sellFailureCooldown — время после неудачного SELL, в течение которого повторные попытки
+// продажи этого же тикера пропускаются. Не делается параметром конфигурации намеренно:
+// это инженерная защита от шторма ошибок, а не торговая настройка.
+const sellFailureCooldown = 30 * time.Minute
 
 // SetIndicators passes current indicators map to executor for ATR-based SL sizing.
 func (e *Executor) SetIndicators(m map[string]indicators.Indicators) {
@@ -62,12 +80,19 @@ func NewExecutor(
 	log *logger.Logger,
 ) *Executor {
 	return &Executor{
-		broker:   bc,
-		repo:     repo,
-		notifier: notifier,
-		config:   cfg,
-		logger:   log,
+		broker:               bc,
+		repo:                 repo,
+		notifier:             notifier,
+		config:               cfg,
+		logger:               log,
+		failedSellAt:         make(map[string]time.Time),
+		apiForbiddenNotified: make(map[string]bool),
 	}
+}
+
+// SetPortfolio passes текущий снапшот портфеля для sanity-check'ов перед ордерами.
+func (e *Executor) SetPortfolio(p *broker.PortfolioInfo) {
+	e.currentPortfolio = p
 }
 
 func (e *Executor) Execute(decisions []ai.AIDecision) {
@@ -91,6 +116,28 @@ func (e *Executor) Execute(decisions []ai.AIDecision) {
 			}
 		}()
 	}
+}
+
+// ForceClose закрывает открытую позицию в обход AI — используется стоп-вотчдогом,
+// когда цена пробила SL или достигла TP между аналитическими циклами.
+func (e *Executor) ForceClose(ticker, reasoning string) {
+	defer func() {
+		if r := recover(); r != nil {
+			e.logger.Error("panic in ForceClose", "ticker", ticker, "panic", fmt.Sprint(r))
+		}
+	}()
+	e.executeSell(ai.AIDecision{Ticker: ticker, Action: "SELL", Confidence: 100, Reasoning: reasoning})
+}
+
+// lotSizeOrOne возвращает размер лота инструмента; при ошибке — 1, чтобы расчёты
+// объёма/PnL хотя бы не падали (для большинства ликвидных бумаг лот и есть 1).
+func (e *Executor) lotSizeOrOne(ticker, instrumentUID string) int64 {
+	lotSize, err := e.broker.GetLotSize(instrumentUID)
+	if err != nil || lotSize <= 0 {
+		e.logger.Warn("lot size unavailable, assuming 1", "ticker", ticker, "err", err)
+		return 1
+	}
+	return int64(lotSize)
 }
 
 func (e *Executor) executeBuy(d ai.AIDecision) {
@@ -126,6 +173,10 @@ func (e *Executor) executeBuy(d ai.AIDecision) {
 		return
 	}
 
+	if !e.apiTradable(d.Ticker, instrumentUID) {
+		return
+	}
+
 	// Get real last price for lots calculation
 	lastPrice := e.broker.GetLastPrice(instrumentUID)
 	if lastPrice <= 0 {
@@ -153,10 +204,13 @@ func (e *Executor) executeBuy(d ai.AIDecision) {
 		return
 	}
 
-	lots := e.broker.CalculateLots(instrumentUID, lastPrice, maxPosition)
+	// Лимит позиции задан в рублях, а заявка — в лотах: считаем от цены лота,
+	// иначе для бумаг с лотом >1 акции позиция раздувается в lotSize раз.
+	pricePerLot := lastPrice * float64(e.lotSizeOrOne(d.Ticker, instrumentUID))
+	lots := e.broker.CalculateLots(instrumentUID, pricePerLot, maxPosition)
 	if lots < 1 {
 		e.logger.Info("BUY skipped: insufficient balance for 1 lot",
-			"ticker", d.Ticker, "price", lastPrice, "maxPosition", maxPosition)
+			"ticker", d.Ticker, "price_per_lot", pricePerLot, "maxPosition", maxPosition)
 		return
 	}
 
@@ -299,6 +353,14 @@ func (e *Executor) executeBuy(d ai.AIDecision) {
 }
 
 func (e *Executor) executeSell(d ai.AIDecision) {
+	// 1. Sell-cooldown: если по этому тикеру недавно был fail, не дёргаем брокера снова.
+	if t, ok := e.failedSellAt[d.Ticker]; ok && time.Since(t) < sellFailureCooldown {
+		remaining := sellFailureCooldown - time.Since(t)
+		e.logger.Info("SELL skipped: in failure cooldown",
+			"ticker", d.Ticker, "remaining_min", int(remaining.Minutes()))
+		return
+	}
+
 	// Find open trade in DB
 	openTrade, err := e.repo.GetOpenTradeByTicker(d.Ticker)
 	if err != nil {
@@ -324,6 +386,27 @@ func (e *Executor) executeSell(d ai.AIDecision) {
 		return
 	}
 
+	if !e.apiTradable(d.Ticker, instrumentUID) {
+		return
+	}
+
+	// 2. Sanity-check quantity vs реальная позиция у брокера. Защита от рассинхрона
+	// (например, после adopt orphan-позиции или ручной частичной продажи через приложение).
+	qty := openTrade.Quantity
+	switch broker := e.brokerLotsForTicker(d.Ticker, instrumentUID); {
+	case broker == 0:
+		e.logger.Info("SELL skipped: position not present at broker, closing DB record",
+			"ticker", d.Ticker, "db_lots", qty)
+		openTrade.Status = "closed"
+		openTrade.PnL = 0
+		_ = e.repo.UpdateTrade(openTrade)
+		return
+	case broker > 0 && broker < qty:
+		e.logger.Info("SELL adjusting quantity to broker actual",
+			"ticker", d.Ticker, "db_lots", qty, "broker_lots", broker)
+		qty = broker
+	}
+
 	// Execute sell order (limit if configured, otherwise market)
 	var result *broker.OrderResult
 	slippage := e.config.Trading.LimitOrderSlippage
@@ -331,24 +414,26 @@ func (e *Executor) executeSell(d ai.AIDecision) {
 		lastPrice := e.broker.GetLastPrice(instrumentUID)
 		if lastPrice > 0 {
 			limitPrice := lastPrice * (1 - slippage/100)
-			result, err = e.broker.SellWithPrice(instrumentUID, openTrade.Quantity, limitPrice)
+			result, err = e.broker.SellWithPrice(instrumentUID, qty, limitPrice)
 		} else {
-			result, err = e.broker.Sell(instrumentUID, openTrade.Quantity)
+			result, err = e.broker.Sell(instrumentUID, qty)
 		}
 	} else {
-		result, err = e.broker.Sell(instrumentUID, openTrade.Quantity)
+		result, err = e.broker.Sell(instrumentUID, qty)
 	}
 	if err != nil {
-		e.logger.Error("sell order failed", "ticker", d.Ticker, "error", err)
+		e.failedSellAt[d.Ticker] = time.Now()
+		e.logger.Error("sell order failed", "ticker", d.Ticker, "lots", qty, "error", err)
 		e.notifier.NotifyError("SELL "+d.Ticker, err)
 		return
 	}
 
-	// Validate execution result — don't record a bogus PnL if broker returned zeros
+	// 3. price=0 lots=0 — это, как правило, async-исполнение или подвисание ответа,
+	// а не реальный фейл. Не паникуем нотификацией — на следующем цикле reconcile
+	// обработает позицию (закроет, если её больше нет у брокера).
 	if result.ExecutedPrice <= 0 || result.ExecutedLots <= 0 {
-		e.logger.Error("SELL order returned zero price/lots, not recording PnL",
+		e.logger.Info("SELL pending: broker returned zero price/lots (likely async exec), reconcile will handle",
 			"ticker", d.Ticker, "price", result.ExecutedPrice, "lots", result.ExecutedLots)
-		e.notifier.NotifyError("SELL "+d.Ticker, fmt.Errorf("broker returned price=%.2f lots=%d — ордер мог не исполниться", result.ExecutedPrice, result.ExecutedLots))
 		return
 	}
 
@@ -356,9 +441,18 @@ func (e *Executor) executeSell(d ai.AIDecision) {
 	e.broker.CancelStopOrders(openTrade.StopLossOrderID, openTrade.TakeProfitOrderID)
 
 	// Calculate PnL with commission
-	grossPnl := (result.ExecutedPrice - openTrade.Price) * float64(openTrade.Quantity)
+	// PnL считаем по фактически исполненному количеству (после sanity-check qty могло
+	// быть скорректировано к реальной позиции у брокера).
+	executedQty := result.ExecutedLots
+	if executedQty <= 0 {
+		executedQty = qty
+	}
+	// Цены — за акцию, quantity — в лотах: переводим в акции, иначе PnL занижается
+	// в lotSize раз для бумаг с лотом >1 акции.
+	shares := float64(executedQty * e.lotSizeOrOne(d.Ticker, instrumentUID))
+	grossPnl := (result.ExecutedPrice - openTrade.Price) * shares
 	commissionPct := e.config.Trading.CommissionPct
-	commission := (openTrade.Price*float64(openTrade.Quantity) + result.ExecutedPrice*float64(openTrade.Quantity)) * commissionPct / 100
+	commission := (openTrade.Price + result.ExecutedPrice) * shares * commissionPct / 100
 	pnl := grossPnl - commission
 
 	// Update trade in DB
@@ -436,6 +530,10 @@ func (e *Executor) sellOrphanedPosition(d ai.AIDecision) {
 		return
 	}
 
+	if !e.apiTradable(d.Ticker, instrumentUID) {
+		return
+	}
+
 	var result *broker.OrderResult
 	slippage := e.config.Trading.LimitOrderSlippage
 	if slippage > 0 {
@@ -489,6 +587,52 @@ func scalePositionByConfidence(maxRub float64, confidence int) float64 {
 	default:
 		return maxRub * 0.50 // 50%
 	}
+}
+
+// brokerLotsForTicker возвращает фактическое количество лотов по тикеру у брокера:
+//   - 0   — позиции у брокера нет (надо закрыть запись локально, не дёргать SELL).
+//   - >0  — лотов у брокера; вызывающий код использует min(db, broker).
+//   - -1  — данных нет (нет снапшота портфеля или не удалось получить lot size).
+//     В этом случае sanity-check пропускается, продаём по DB-значению.
+func (e *Executor) brokerLotsForTicker(ticker, instrumentUID string) int64 {
+	if e.currentPortfolio == nil {
+		return -1
+	}
+	for _, p := range e.currentPortfolio.Positions {
+		if p.Ticker != ticker {
+			continue
+		}
+		if p.Quantity <= 0 {
+			return 0
+		}
+		lotSize, err := e.broker.GetLotSize(instrumentUID)
+		if err != nil || lotSize <= 0 {
+			return -1
+		}
+		return int64(p.Quantity) / int64(lotSize)
+	}
+	return 0 // тикер не найден в портфеле = нет позиции
+}
+
+// apiTradable проверяет, можно ли торговать инструментом через API. Если нельзя
+// (api_trade_available_flag=false → T-Invest отклоняет ордер кодом 30052), ставить
+// заявку бесполезно: BUY всё равно не пройдёт, а позицию для SELL придётся продавать
+// вручную в приложении. Чтобы не спамить телегу одинаковой ошибкой каждый цикл,
+// уведомляем один раз на тикер за жизнь процесса. Возвращает true, если торговать можно.
+func (e *Executor) apiTradable(ticker, instrumentUID string) bool {
+	if e.broker.IsAPITradeAvailable(instrumentUID) {
+		return true
+	}
+
+	e.logger.Info("order skipped: instrument forbidden for trading via API (T-Invest 30052)",
+		"ticker", ticker)
+
+	if !e.apiForbiddenNotified[ticker] {
+		e.apiForbiddenNotified[ticker] = true
+		e.notifier.NotifyError(ticker,
+			fmt.Errorf("инструмент недоступен для торговли через API (код 30052) — операцию нужно выполнить вручную в приложении"))
+	}
+	return false
 }
 
 func DecisionsToJSON(decisions []ai.AIDecision) string {

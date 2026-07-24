@@ -20,6 +20,9 @@ type PositionInfo struct {
 	AvgPrice      float64
 	CurrentPrice  float64
 	PnL           float64
+	// ManualSaleRequired — инструмент запрещён для торговли через API (T-Invest 30052):
+	// бот не сможет закрыть позицию, продавать надо вручную в приложении.
+	ManualSaleRequired bool
 }
 
 func (bc *BrokerClient) GetPortfolio() (*PortfolioInfo, error) {
@@ -79,6 +82,15 @@ func (bc *BrokerClient) GetPortfolio() (*PortfolioInfo, error) {
 		if ey := pos.GetExpectedYield(); ey != nil {
 			pi.PnL = ey.ToFloat()
 		}
+		// Бот работает только от лонга: отрицательное количество — фантомный шорт
+		// (артефакт песочницы после продажи большего, чем было). Такие позиции
+		// нельзя ни закрыть, ни осмысленно показать AI — исключаем их везде.
+		if pi.Quantity < 0 {
+			bc.Logger.Warn("skipping negative position (phantom short)",
+				"ticker", pi.Ticker, "quantity", pi.Quantity)
+			continue
+		}
+		pi.ManualSaleRequired = !bc.IsAPITradeAvailable(pi.InstrumentUID)
 		info.Positions = append(info.Positions, pi)
 	}
 

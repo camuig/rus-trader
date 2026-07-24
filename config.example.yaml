@@ -43,6 +43,11 @@ trading:
   default_take_profit_pct: 4.5
   # Maximum number of tickers to send for AI analysis per cycle
   max_analysis_tickers: 20
+  # Размер пула кандидатов для расчёта индикаторов (до пре-фильтра и Screener).
+  # Должен быть больше max_analysis_tickers, чтобы после отсечения тикеров
+  # жёсткими BUY-фильтрами (ATR%, RSI, uptrend, cooldown) оставалось достаточно
+  # кандидатов для ИИ. 0 = auto: max_analysis_tickers*3.
+  candidate_pool_size: 60
   # Maximum bid/ask spread (%) to allow BUY. 0 = disabled
   max_spread_pct: 0.3
   # Trailing stop: enable automatic SL adjustment
@@ -78,6 +83,26 @@ trading:
   # Window (in days) for counting losing streak. Older trades are ignored so blocks
   # naturally expire and never become permanent. 0 = unlimited (not recommended).
   losing_streak_window_days: 7
+  # Cooldown (minutes) before re-entering a ticker after a SELL. Default 7200 (5 days):
+  # статистика показала, что повторные входы в тот же тикер в первые дни убыточны.
+  cooldown_minutes: 7200
+  # Minimum hold time (minutes) before AI may close a position. Watchdog SL/TP ignores this.
+  min_hold_minutes: 240
+  # Fast SL/TP watchdog loop: checks open positions every interval and force-closes
+  # breached stops with a market order, without waiting for the AI cycle. "0" = disabled.
+  stop_watchdog_interval: "2m"
+  # Quotes deviating more than this % (per day or vs entry) are treated as bad data
+  # and excluded from analysis/orders (sandbox regularly returns garbage prices)
+  max_price_deviation_pct: 30
+  # Cap on total open portfolio risk: Σ(entry−SL)×shares across open positions (RUB).
+  # New BUYs that would push total risk above this are blocked. 0 = disabled
+  max_portfolio_risk_rub: 2000
+  # Broker commission per side (%), included in PnL calculation
+  commission_pct: 0.025
+  # Maximum simultaneously open positions
+  max_open_positions: 5
+  # Maximum trades per day (BUY+SELL)
+  max_daily_trades: 15
 
 # Telegram notifications (optional)
 telegram:

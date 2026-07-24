@@ -8,7 +8,7 @@ import (
 )
 
 var (
-	thinkTagRegex = regexp.MustCompile(`(?s)<think>.*?</think>`)
+	thinkTagRegex  = regexp.MustCompile(`(?s)<think>.*?</think>`)
 	codeFenceRegex = regexp.MustCompile("(?si)```\\w*\\s*\n(.*?)\n\\s*```")
 )
 

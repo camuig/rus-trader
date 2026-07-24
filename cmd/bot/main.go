@@ -73,6 +73,17 @@ func main() {
 	exec := executor.NewExecutor(bc, repo, notifier, cfg, log)
 	moexClient := moex.NewClient(log)
 	tradeGuard := guard.NewTradeGuard(repo, cfg, log)
+	tradeGuard.SetLotSizeFn(func(ticker string) int64 {
+		uid, err := bc.ResolveTickerToUID(ticker)
+		if err != nil {
+			return 1
+		}
+		lotSize, err := bc.GetLotSize(uid)
+		if err != nil || lotSize <= 0 {
+			return 1
+		}
+		return int64(lotSize)
+	})
 
 	// Dividend fetcher (optional)
 	var divFetcher *dividends.Fetcher

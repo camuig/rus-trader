@@ -11,6 +11,7 @@ import (
 	"github.com/camuig/rus-trader/internal/broker"
 	"github.com/camuig/rus-trader/internal/dividends"
 	"github.com/camuig/rus-trader/internal/features"
+	"github.com/camuig/rus-trader/internal/guard"
 	"github.com/camuig/rus-trader/internal/moex"
 	"github.com/camuig/rus-trader/internal/orderbook"
 	"github.com/camuig/rus-trader/internal/screener"
@@ -73,8 +74,13 @@ func (s *Scheduler) runCycle(ctx context.Context) (ok bool) {
 func (s *Scheduler) collectData(ctx context.Context, state *cycleState) bool {
 	s.logger.Info("starting analysis cycle")
 
-	// 1. Fetch top tickers from MOEX
-	topTickers, err := s.moex.FetchTopTickers(ctx, 50)
+	// 1. Fetch top tickers from MOEX. Берём с запасом — чтобы пул под пре-фильтр
+	// был достаточным даже после отсеивания не-торгуемых.
+	topN := s.config.Trading.CandidatePoolSize + 30
+	if topN < 50 {
+		topN = 50
+	}
+	topTickers, err := s.moex.FetchTopTickers(ctx, topN)
 	if err != nil {
 		s.logger.Error("fetch top tickers", "error", err)
 		s.saveAnalysisLog(0, "", "", err)
@@ -107,19 +113,22 @@ func (s *Scheduler) collectData(ctx context.Context, state *cycleState) bool {
 		return false
 	}
 
-	maxTickers := s.config.Trading.MaxAnalysisTickers
-	state.tradableTickers = make([]string, 0, maxTickers)
+	// Пул кандидатов для расчёта индикаторов (до пре-фильтра и Screener).
+	// Должен быть больше MaxAnalysisTickers, чтобы после отсечения жёстких BUY-фильтров
+	// оставалось достаточно тикеров для ИИ.
+	poolSize := s.config.Trading.CandidatePoolSize
+	state.tradableTickers = make([]string, 0, poolSize)
 	tradableSet := make(map[string]bool)
 	for _, uid := range uids {
 		if tradable[uid] {
 			t := uidToTicker[uid]
 			tradableSet[t] = true
-			if len(state.tradableTickers) < maxTickers {
+			if len(state.tradableTickers) < poolSize {
 				state.tradableTickers = append(state.tradableTickers, t)
 			}
 		}
 	}
-	s.logger.Info("tradable tickers", "total", len(tradableSet), "selected", len(state.tradableTickers))
+	s.logger.Info("tradable tickers", "total", len(tradableSet), "pool", len(state.tradableTickers))
 
 	// 3. Get portfolio
 	state.portfolio, err = s.broker.GetPortfolio()
@@ -130,6 +139,7 @@ func (s *Scheduler) collectData(ctx context.Context, state *cycleState) bool {
 	}
 
 	s.reconcileOrphanTrades(state.portfolio)
+	s.adoptOrphanPositions(state.portfolio)
 
 	// 4. Include position tickers
 	for _, pos := range state.portfolio.Positions {
@@ -150,13 +160,43 @@ func (s *Scheduler) collectData(ctx context.Context, state *cycleState) bool {
 	state.allSnapshots = s.broker.FetchCandleSnapshots(state.tradableTickers, concurrency)
 	s.logger.Info("candle snapshots fetched", "count", len(state.allSnapshots))
 
+	// 5.1. Санити-фильтр: аномальные котировки (кейс EUTR: -99% за день в песочнице)
+	// не должны попадать ни в AI, ни в ордера.
+	state.allSnapshots = s.filterAnomalousSnapshots(state.allSnapshots)
+
 	// 5a. Screen tickers
 	positionTickers := make(map[string]bool, len(state.portfolio.Positions))
 	for _, pos := range state.portfolio.Positions {
 		positionTickers[pos.Ticker] = true
 	}
-	state.snapshots = screener.Screen(state.allSnapshots, positionTickers, s.config.Trading.MaxAnalysisTickers, s.config.Trading.MinScreenerScore)
-	s.logger.Info("screened tickers", "before", len(state.allSnapshots), "after", len(state.snapshots))
+
+	// 5a.1. Pre-screen: отсечь не-позиционные тикеры, которые заведомо не пройдут
+	// жёсткие BUY-фильтры (ATR%, RSI, uptrend, cooldown, recent_loss, streak).
+	// Это экономит слоты MaxAnalysisTickers: ИИ анализирует только реально покупаемых кандидатов.
+	preScreen := s.guard.PreScreenBuyable(state.allSnapshots, positionTickers)
+	if len(preScreen.Blocked) > 0 {
+		// Агрегированная разбивка по причинам — видим, какой фильтр доминирует,
+		// и можем осознанно ослаблять параметры, а не гадать.
+		s.logger.Info("pre-screen breakdown",
+			"blocked_total", len(preScreen.Blocked),
+			"allowed", len(preScreen.Allowed),
+			"cooldown", preScreen.BlockCounts[guard.BlockReasonCooldown],
+			"recent_loss", preScreen.BlockCounts[guard.BlockReasonRecentLoss],
+			"losing_streak", preScreen.BlockCounts[guard.BlockReasonLosingStreak],
+			"rsi_overbought", preScreen.BlockCounts[guard.BlockReasonRSI],
+			"downtrend", preScreen.BlockCounts[guard.BlockReasonDowntrend],
+			"low_atr", preScreen.BlockCounts[guard.BlockReasonLowATR])
+		for ticker, reason := range preScreen.Blocked {
+			s.logger.Debug("pre-screen block", "ticker", ticker, "reason", reason)
+		}
+	}
+
+	state.snapshots = screener.Screen(preScreen.Allowed, positionTickers, s.config.Trading.MaxAnalysisTickers, s.config.Trading.MinScreenerScore)
+	s.logger.Info("screened tickers",
+		"pool", len(state.allSnapshots),
+		"after_pre_screen", len(preScreen.Allowed),
+		"blocked_by_pre_screen", len(preScreen.Blocked),
+		"to_ai", len(state.snapshots))
 
 	// Log screener scores
 	scores := screener.Scores(state.allSnapshots)
@@ -272,7 +312,15 @@ func (s *Scheduler) enrichData(ctx context.Context, state *cycleState) {
 	}
 	state.sentimentMap = s.scoreSentiment(ctx, state.tickerNews, screenerTickers)
 
-	// Build textual features
+	// Build textual features.
+	// featuresMap (по ticker) — нужен Position Manager и пост-фильтру, включает ВСЕ тикеры.
+	// featuresList — уходит в Screening Agent (поиск новых BUY); позиционные тикеры в него
+	// НЕ включаем: скрининг не должен предлагать BUY на уже открытые позиции (усреднение
+	// — задача Position Manager, и оно обычно блокируется по EMA в нисходящем тренде).
+	positionTickers := make(map[string]bool, len(state.portfolio.Positions))
+	for _, pos := range state.portfolio.Positions {
+		positionTickers[pos.Ticker] = true
+	}
 	state.featuresMap = make(map[string]string, len(state.snapshots))
 	for _, snap := range state.snapshots {
 		var divPtr *dividends.DividendInfo
@@ -289,7 +337,9 @@ func (s *Scheduler) enrichData(ctx context.Context, state *cycleState) {
 		}
 		tf := features.BuildTickerFeatures(snap, divPtr, obPtr, sentPtr)
 		state.featuresMap[tf.Ticker] = tf.Summary
-		state.featuresList = append(state.featuresList, tf.Summary)
+		if !positionTickers[snap.Ticker] {
+			state.featuresList = append(state.featuresList, tf.Summary)
+		}
 	}
 	s.executor.SetFeatures(state.featuresMap)
 
@@ -299,7 +349,15 @@ func (s *Scheduler) enrichData(ctx context.Context, state *cycleState) {
 
 // runAgents calls Screening Agent and Position Manager in parallel.
 func (s *Scheduler) runAgents(ctx context.Context, state *cycleState) {
-	s.logger.Info("starting dual AI analysis",
+	// Проверяем глобальные гейты: если новых позиций открыть нельзя,
+	// screening agent бесполезен — не тратим токены, работает только Position Manager.
+	canBuy, buyBlockReason := s.guard.CanOpenNewPositions()
+	if !canBuy {
+		s.logger.Info("skipping screening agent: no new buys allowed", "reason", buyBlockReason)
+	}
+
+	s.logger.Info("starting AI analysis",
+		"screening_enabled", canBuy,
 		"screening_tickers", len(state.featuresList),
 		"open_positions", len(state.portfolio.Positions))
 
@@ -316,31 +374,33 @@ func (s *Scheduler) runAgents(ctx context.Context, state *cycleState) {
 
 	g, gctx := errgroup.WithContext(ctx)
 
-	// Screening Agent
-	g.Go(func() error {
-		screeningReq := &ai.ScreeningRequest{
-			TickerFeatures:  state.featuresList,
-			Market:          state.marketCtx,
-			GlobalNews:      state.globalNews,
-			TickerNews:      tickerNewsMap,
-			Lessons:         state.lessonLines,
-			TodayTraded:     state.todayTraded,
-			Stats:           state.stats,
-			CurrentTime:     time.Now().In(s.loc),
-			AvailableRub:    state.portfolio.AvailableRub,
-			SimilarPatterns: state.patterns,
-		}
-		decs, raw, err := s.ai.ScreeningAnalyze(gctx, screeningReq)
-		if err != nil {
-			s.logger.Error("screening agent failed", "error", err)
+	// Screening Agent — только если открывать новые позиции в принципе разрешено
+	if canBuy {
+		g.Go(func() error {
+			screeningReq := &ai.ScreeningRequest{
+				TickerFeatures:  state.featuresList,
+				Market:          state.marketCtx,
+				GlobalNews:      state.globalNews,
+				TickerNews:      tickerNewsMap,
+				Lessons:         state.lessonLines,
+				TodayTraded:     state.todayTraded,
+				Stats:           state.stats,
+				CurrentTime:     time.Now().In(s.loc),
+				AvailableRub:    state.portfolio.AvailableRub,
+				SimilarPatterns: state.patterns,
+			}
+			decs, raw, err := s.ai.ScreeningAnalyze(gctx, screeningReq)
+			if err != nil {
+				s.logger.Error("screening agent failed", "error", err)
+				screeningRaw = raw
+				return nil
+			}
+			screeningDecisions = decs
 			screeningRaw = raw
+			s.logger.Info("screening agent done", "decisions", len(decs))
 			return nil
-		}
-		screeningDecisions = decs
-		screeningRaw = raw
-		s.logger.Info("screening agent done", "decisions", len(decs))
-		return nil
-	})
+		})
+	}
 
 	// Position Manager
 	if len(state.portfolio.Positions) > 0 {

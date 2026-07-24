@@ -9,6 +9,7 @@ import (
 	"github.com/camuig/rus-trader/internal/broker"
 	"github.com/camuig/rus-trader/internal/config"
 	"github.com/camuig/rus-trader/internal/logger"
+	"github.com/camuig/rus-trader/internal/moex"
 	"github.com/camuig/rus-trader/internal/storage"
 )
 
@@ -18,14 +19,16 @@ type Server struct {
 	repo       *storage.Repository
 	config     *config.Config
 	logger     *logger.Logger
+	moex       *moex.Client
 }
 
-func NewServer(bc *broker.BrokerClient, repo *storage.Repository, cfg *config.Config, log *logger.Logger) *Server {
+func NewServer(bc *broker.BrokerClient, repo *storage.Repository, cfg *config.Config, log *logger.Logger, mc *moex.Client) *Server {
 	s := &Server{
 		broker: bc,
 		repo:   repo,
 		config: cfg,
 		logger: log,
+		moex:   mc,
 	}
 
 	mux := http.NewServeMux()

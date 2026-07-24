@@ -34,6 +34,10 @@ type Scheduler struct {
 	journal     *journal.Journal
 	sentiment   *sentiment.Scorer
 	vectorStore *vectordb.Store
+
+	// Инжектируемый lookup размера лота — используется в unit-тестах в обход gRPC-брокера.
+	// Если nil, по умолчанию вызывается s.broker.GetLotSize.
+	lotSizeFn func(uid string) (int32, error)
 }
 
 func NewScheduler(
@@ -77,6 +81,8 @@ func (s *Scheduler) Run(ctx context.Context) {
 	defer ticker.Stop()
 
 	s.logger.Info("scheduler started", "interval", interval.String())
+
+	go s.RunStopWatchdog(ctx)
 
 	s.runWithRetry(ctx)
 
