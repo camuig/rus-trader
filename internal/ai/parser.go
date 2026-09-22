@@ -38,13 +38,13 @@ func ParseDecisions(text string) ([]AIDecision, error) {
 	// Try parsing as array first
 	var decisions []AIDecision
 	if err := json.Unmarshal([]byte(cleaned), &decisions); err == nil {
-		return decisions, nil
+		return normalizeDecisions(decisions), nil
 	}
 
 	// Try parsing as single object
 	var single AIDecision
 	if err := json.Unmarshal([]byte(cleaned), &single); err == nil {
-		return []AIDecision{single}, nil
+		return normalizeDecisions([]AIDecision{single}), nil
 	}
 
 	// Try to extract JSON from the text
@@ -53,7 +53,7 @@ func ParseDecisions(text string) ([]AIDecision, error) {
 	if jsonStart >= 0 && jsonEnd > jsonStart {
 		substr := cleaned[jsonStart : jsonEnd+1]
 		if err := json.Unmarshal([]byte(substr), &decisions); err == nil {
-			return decisions, nil
+			return normalizeDecisions(decisions), nil
 		}
 	}
 
@@ -63,9 +63,22 @@ func ParseDecisions(text string) ([]AIDecision, error) {
 	if jsonStart >= 0 && jsonEnd > jsonStart {
 		substr := cleaned[jsonStart : jsonEnd+1]
 		if err := json.Unmarshal([]byte(substr), &single); err == nil {
-			return []AIDecision{single}, nil
+			return normalizeDecisions([]AIDecision{single}), nil
 		}
 	}
 
 	return nil, fmt.Errorf("failed to parse AI response as JSON: %.200s", cleaned)
+}
+
+// normalizeDecisions приводит confidence BUY-решений к шкале 0-100: разные модели
+// возвращают долю (0.85) вместо процентов (85), и без нормализации такая сделка
+// тихо отсеивалась бы порогом trading.min_confidence.
+func normalizeDecisions(decisions []AIDecision) []AIDecision {
+	for i := range decisions {
+		d := &decisions[i]
+		if d.Action == "BUY" && d.Confidence > 0 && d.Confidence <= 1 {
+			d.Confidence *= 100
+		}
+	}
+	return decisions
 }
