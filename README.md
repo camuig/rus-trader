@@ -1,6 +1,6 @@
 # Rus-Trader
 
-Автоматизированный торговый бот для российского фондового рынка (MOEX). Собирает рыночные данные (топ-50 ликвидных акций TQBR, часовые свечи, новости), анализирует их через DeepSeek R1 и автоматически исполняет сделки через T-Invest API.
+Автоматизированный торговый бот для российского фондового рынка (MOEX). Собирает рыночные данные (топ-50 ликвидных акций TQBR, часовые свечи, новости), анализирует их через LLM (DeepSeek V4 через OpenRouter) и автоматически исполняет сделки через T-Invest API.
 
 ## Архитектура
 
@@ -19,7 +19,7 @@ Indicators   → RSI(14), EMA(9/21), ATR(14), RelVol, S/R уровни
       ↓
 Screener     → фильтрация тикеров по силе сигнала
       ↓
-DeepSeek R1  → анализ индикаторов + OHLCV + новостей → JSON решения
+LLM (OpenRouter) → анализ индикаторов + OHLCV + новостей → JSON решения
       ↓
 TradeGuard   → pre-validation (RSI > 80, время суток, лимиты)
       ↓
@@ -28,7 +28,7 @@ Executor     → лимитные ордера + SL/TP + trailing stop
 SQLite + Telegram + Web Dashboard
 ```
 
-**Стек:** Go, T-Invest API (gRPC), MOEX ISS API, DeepSeek R1, SQLite (GORM), Telegram Bot API
+**Стек:** Go, T-Invest API (gRPC), MOEX ISS API, OpenRouter (DeepSeek V4), SQLite (GORM), Telegram Bot API
 
 ## Быстрый старт
 
@@ -36,7 +36,7 @@ SQLite + Telegram + Web Dashboard
 
 - Go 1.22+
 - Токен T-Invest API ([получить](https://www.tbank.ru/invest/settings/))
-- API ключ DeepSeek ([получить](https://platform.deepseek.com/))
+- API ключ OpenRouter ([получить](https://openrouter.ai/keys))
 
 ### Настройка
 
@@ -44,6 +44,24 @@ SQLite + Telegram + Web Dashboard
 cp config.example.yaml config.yaml
 # Отредактируйте config.yaml — укажите токены
 ```
+
+### LLM-провайдер
+
+Бот ходит к LLM через OpenAI-совместимый API. По умолчанию это [OpenRouter](https://openrouter.ai) — один ключ даёт доступ к DeepSeek, Qwen, Gemini и другим моделям, а при недоступности провайдера OpenRouter сам переключает маршрут.
+
+```yaml
+llm:
+  api_key: "sk-or-..."
+  model: "deepseek/deepseek-v4-pro"       # screening + position manager
+  reasoning_effort: "medium"              # low / medium / high
+sentiment:
+  model: "deepseek/deepseek-v4-flash"     # дешёвая модель для sentiment
+ai_agents:
+  journal_review:
+    model: ""                             # пусто = основная модель
+```
+
+Прямой доступ к DeepSeek по-прежнему работает: укажите `base_url: "https://api.deepseek.com/v1"` и модель `deepseek-reasoner`. Старая секция `deepseek:` в конфиге читается как устаревший алиас `llm:` (с base_url DeepSeek).
 
 ### Запуск
 
@@ -58,7 +76,24 @@ make run
 make docker
 ```
 
-Dashboard доступен на `http://localhost:8080`
+Dashboard доступен на `http://localhost:9000` (порт задаётся в `web.port`).
+
+В `docker-compose.yml` порт публикуется на всех интерфейсах (`9000:9000`), то есть на сервере дашборд открыт напрямую по `http://<server-ip>:9000`.
+
+### Авторизация дашборда
+
+Дашборд закрывается HTTP Basic Auth через `web.auth_user` / `web.auth_password`:
+
+```yaml
+web:
+  port: 9000
+  auth_user: "admin"
+  auth_password: "<длинный случайный пароль>"
+```
+
+Оба поля обязаны быть заданы вместе — при половинчатой настройке бот падает на старте с ошибкой валидации, чтобы дашборд не остался случайно открытым. Если оба пусты, авторизации нет (допустимо только при привязке к loopback); бот пишет об этом в лог при старте. Авторизация закрывает и `/static/`, сравнение логина и пароля — константное по времени (`crypto/subtle` по SHA-256-хэшам).
+
+> ⚠️ Basic Auth поверх обычного HTTP передаёт логин и пароль в base64 без шифрования — их видно тому, кто слушает трафик. Для публичного порта это защита от случайных прохожих и сканеров, но не от MITM. Полноценный вариант — убрать порт на loopback (`127.0.0.1:9000:9000`) и повесить перед ним nginx с TLS.
 
 ## Makefile
 
@@ -97,9 +132,13 @@ go run ./cmd/closeall/ -config config.yaml
 | `tinkoff.token` | API токен T-Invest | (обязательный) |
 | `tinkoff.sandbox` | Режим песочницы | `true` |
 | `tinkoff.account_id` | ID аккаунта (авто в sandbox) | `""` |
-| `deepseek.api_key` | API ключ DeepSeek | (обязательный) |
-| `deepseek.model` | Модель DeepSeek | `deepseek-reasoner` |
-| `deepseek.timeout_seconds` | Таймаут запроса | `120` |
+| `tinkoff.tls_ca_cert_file` | PEM-файл корневого CA (корпоративный CA / MITM-прокси) | `""` |
+| `tinkoff.insecure_skip_verify` | Отключить проверку TLS-сертификата брокера (**небезопасно**) | `false` |
+| `llm.api_key` | API ключ OpenRouter (или другого OpenAI-совместимого провайдера) | (обязательный) |
+| `llm.base_url` | Эндпоинт провайдера | `https://openrouter.ai/api/v1` |
+| `llm.model` | Основная модель (screening + position manager) | `deepseek/deepseek-v4-pro` |
+| `llm.reasoning_effort` | Глубина рассуждений: `low` / `medium` / `high` | `""` |
+| `llm.timeout_seconds` | Таймаут запроса | `180` |
 | `trading.interval` | Интервал анализа | `15m` |
 | `trading.max_position_rub` | Макс. на позицию (руб) | `10000` |
 | `trading.min_confidence` | Мин. уверенность AI (0-100) | `70` |
@@ -122,10 +161,14 @@ go run ./cmd/closeall/ -config config.yaml
 | `trading.min_atr_pct` | Мин. ATR/цена % для BUY (фильтр волатильности) | `1.2` |
 | `trading.recent_loss_cooldown_days` | Блокировка BUY по тикерам с убытком за N дней | `1` |
 | `trading.max_losing_streak_per_ticker` | Блок BUY при N+ убытках подряд на тикере | `2` |
+| `trading.max_open_positions` | Макс. одновременно открытых позиций | `5` |
+| `trading.max_daily_trades` | Макс. сделок в день (BUY+SELL) | `15` |
 | `telegram.enabled` | Включить уведомления | `false` |
 | `telegram.bot_token` | Токен Telegram бота | |
 | `telegram.chat_id` | Chat ID для уведомлений | |
 | `web.port` | Порт веб-дашборда | `8080` |
+| `web.auth_user` | Логин Basic Auth для дашборда (пусто = без авторизации) | `""` |
+| `web.auth_password` | Пароль Basic Auth для дашборда | `""` |
 
 ## Telegram
 
@@ -264,7 +307,7 @@ ai_agents:
 Метрики добавляются в текстовые features: `"стакан: bid давление 1.8x, спред 0.12%, bid wall 298.50 (7.2x)"`.
 
 ### Sentiment Scoring
-Новости (Finam, world) + посты с форума SmartLab прогоняются через LLM (дешёвая модель `deepseek-chat`) для оценки sentiment по каждому тикеру: от -1.0 (крайне негативный) до +1.0 (крайне позитивный).
+Новости (Finam, world) + посты с форума SmartLab прогоняются через LLM (дешёвая модель `deepseek/deepseek-v4-flash`) для оценки sentiment по каждому тикеру: от -1.0 (крайне негативный) до +1.0 (крайне позитивный).
 
 Результат в features: `"sentiment +0.6 (рекордные дивиденды)"`.
 
@@ -282,7 +325,7 @@ orderbook:
 
 sentiment:
   enabled: true
-  model: "deepseek-chat"
+  model: "deepseek/deepseek-v4-flash"
   forum_enabled: true
 
 vectordb:
@@ -373,3 +416,30 @@ Profit Factor, Max Drawdown, Win Rate, средний плюс/минус, ср�
 По умолчанию бот работает в sandbox-режиме. Аккаунт создаётся автоматически и пополняется на 1,000,000 руб. Stop-ордера в sandbox не поддерживаются T-Invest API — их роль выполняет стоп-вотчдог (см. Phase 4), который закрывает пробитые SL/TP рыночным ордером.
 
 Для перехода на реальную торговлю установите `tinkoff.sandbox: false` и укажите `tinkoff.account_id`.
+
+## Проблемы с TLS
+
+Ошибка при старте:
+
+```
+broker client init failed: create investgo client: rpc error: code = Unavailable
+desc = transport: authentication handshake failed: tls: failed to verify certificate:
+x509: certificate signed by unknown authority
+```
+
+Означает, что системе не хватает корневых сертификатов (типично для минимального Docker-образа без `ca-certificates`) либо трафик перехватывает корпоративный/антивирусный прокси со своим CA.
+
+Варианты решения по убыванию предпочтительности:
+
+1. Установить системные корневые сертификаты (`apk add ca-certificates` / `apt-get install ca-certificates`).
+2. Указать нужный корневой сертификат явно:
+   ```yaml
+   tinkoff:
+     tls_ca_cert_file: "/etc/ssl/certs/corporate-ca.pem"
+   ```
+3. Полностью отключить проверку сертификата (обход на крайний случай):
+   ```yaml
+   tinkoff:
+     insecure_skip_verify: true
+   ```
+   При включении в лог пишется предупреждение `SECURITY WARNING: TLS certificate verification is DISABLED`. Соединение с брокером в этом режиме уязвимо к MITM, а API-токен уходит в незаверенный канал — не оставляйте это в реальной торговле.

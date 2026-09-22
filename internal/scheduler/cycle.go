@@ -227,7 +227,7 @@ func (s *Scheduler) collectData(ctx context.Context, state *cycleState) bool {
 	s.logger.Info("finam news fetched", "total", len(finamNews), "matched_tickers", len(state.tickerNews))
 
 	worldCtx, cancelWorld := context.WithTimeout(ctx, 8*time.Second)
-	worldNewsItems, err := s.moex.FetchWorldNews(worldCtx, s.config.DeepSeek.MaxWorldNewsItems*2)
+	worldNewsItems, err := s.moex.FetchWorldNews(worldCtx, s.config.LLM.MaxWorldNewsItems*2)
 	cancelWorld()
 	if err != nil {
 		s.logger.Error("fetch world news", "error", err)

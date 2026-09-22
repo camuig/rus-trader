@@ -1,4 +1,4 @@
-FROM golang:1.22-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 RUN apk add --no-cache gcc musl-dev git
 
@@ -24,7 +24,7 @@ COPY config.example.yaml /app/config.example.yaml
 
 RUN mkdir -p /app/data
 
-EXPOSE 8080
+EXPOSE 9000
 
 ENTRYPOINT ["/app/bot"]
 CMD ["-config", "/app/config.yaml", "-db", "/app/data/rus-trader.db"]

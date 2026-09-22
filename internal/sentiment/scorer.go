@@ -19,12 +19,12 @@ type SentimentResult struct {
 }
 
 type Scorer struct {
-	aiClient *ai.DeepSeekClient
+	aiClient *ai.Client
 	config   *config.Config
 	logger   *logger.Logger
 }
 
-func NewScorer(aiClient *ai.DeepSeekClient, cfg *config.Config, log *logger.Logger) *Scorer {
+func NewScorer(aiClient *ai.Client, cfg *config.Config, log *logger.Logger) *Scorer {
 	return &Scorer{aiClient: aiClient, config: cfg, logger: log}
 }
 
@@ -42,7 +42,7 @@ func (s *Scorer) ScoreBatch(ctx context.Context, tickerTexts map[string][]string
 
 	model := s.config.Sentiment.Model
 	if model == "" {
-		model = "deepseek-chat"
+		model = config.DefaultLLMCheapModel
 	}
 
 	rawResponse, err := s.aiClient.CallLLM(ctx, sentimentSystemPrompt, userPrompt, model, 60)

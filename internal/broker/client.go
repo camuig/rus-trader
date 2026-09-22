@@ -28,10 +28,16 @@ func NewBrokerClient(ctx context.Context, cfg *config.Config, log *logger.Logger
 	}
 
 	investCfg := investgo.Config{
-		EndPoint:  endpoint,
-		Token:     cfg.Tinkoff.Token,
-		AccountId: cfg.Tinkoff.AccountID,
-		AppName:   "rus-trader",
+		EndPoint:           endpoint,
+		Token:              cfg.Tinkoff.Token,
+		AccountId:          cfg.Tinkoff.AccountID,
+		AppName:            "rus-trader",
+		TLSCACertFile:      cfg.Tinkoff.TLSCACertFile,
+		InsecureSkipVerify: cfg.Tinkoff.InsecureSkipVerify,
+	}
+
+	if cfg.Tinkoff.InsecureSkipVerify {
+		log.Errorf("SECURITY WARNING: TLS certificate verification is DISABLED (tinkoff.insecure_skip_verify=true); connection to %s is vulnerable to MITM", endpoint)
 	}
 
 	client, err := investgo.NewClient(ctx, investCfg, log)

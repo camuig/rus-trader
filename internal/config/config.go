@@ -9,8 +9,11 @@ import (
 )
 
 type Config struct {
-	Tinkoff   TinkoffConfig   `yaml:"tinkoff"`
-	DeepSeek  DeepSeekConfig  `yaml:"deepseek"`
+	Tinkoff TinkoffConfig `yaml:"tinkoff"`
+	LLM     LLMConfig     `yaml:"llm"`
+	// DeepSeek — устаревшая секция конфига (прямой API DeepSeek). Если llm.api_key
+	// не задан, значения переносятся в LLM для обратной совместимости.
+	DeepSeek  *LLMConfig      `yaml:"deepseek,omitempty"`
 	Trading   TradingConfig   `yaml:"trading"`
 	Telegram  TelegramConfig  `yaml:"telegram"`
 	Web       WebConfig       `yaml:"web"`
@@ -27,11 +30,26 @@ type TinkoffConfig struct {
 	Token     string `yaml:"token"`
 	Sandbox   bool   `yaml:"sandbox"`
 	AccountID string `yaml:"account_id"`
+	// TLSCACertFile — путь к PEM-файлу с корневым сертификатом (корпоративный CA,
+	// MITM-прокси или отсутствующий системный набор ca-certificates).
+	TLSCACertFile string `yaml:"tls_ca_cert_file"`
+	// InsecureSkipVerify — полностью отключает проверку TLS-сертификата брокера.
+	// Небезопасно: соединение уязвимо к MITM, а токен уходит в незаверенный канал.
+	// Использовать только как временный обход, предпочтительнее tls_ca_cert_file.
+	InsecureSkipVerify bool `yaml:"insecure_skip_verify"`
 }
 
-type DeepSeekConfig struct {
-	APIKey              string `yaml:"api_key"`
-	Model               string `yaml:"model"`
+// LLMConfig — настройки LLM-провайдера. По умолчанию OpenRouter (OpenAI-совместимый
+// API), но base_url можно указать на любой другой совместимый эндпоинт.
+type LLMConfig struct {
+	APIKey  string `yaml:"api_key"`
+	BaseURL string `yaml:"base_url"`
+	// Model — основная модель (screening + position manager) в формате OpenRouter,
+	// например "deepseek/deepseek-v4-pro".
+	Model string `yaml:"model"`
+	// ReasoningEffort — уровень рассуждений (low/medium/high) для моделей с reasoning;
+	// пустое значение — параметр не передаётся.
+	ReasoningEffort     string `yaml:"reasoning_effort"`
 	TimeoutSeconds      int    `yaml:"timeout_seconds"`
 	PromptMaxChars      int    `yaml:"prompt_max_chars"`
 	MaxTickerBriefChars int    `yaml:"max_ticker_brief_chars"`
@@ -84,6 +102,10 @@ type TelegramConfig struct {
 
 type WebConfig struct {
 	Port int `yaml:"port"`
+	// Basic auth for the dashboard. If both are empty, the dashboard is served
+	// without authentication (fine on loopback, dangerous on a public port).
+	AuthUser     string `yaml:"auth_user"`
+	AuthPassword string `yaml:"auth_password"`
 }
 
 type LoggingConfig struct {
@@ -151,6 +173,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
+	migrateLegacyDeepSeek(cfg)
 	setDefaults(cfg)
 
 	if err := cfg.Validate(); err != nil {
@@ -160,27 +183,54 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
+const (
+	DefaultLLMBaseURL        = "https://openrouter.ai/api/v1"
+	DefaultLLMModel          = "deepseek/deepseek-v4-pro"
+	DefaultLLMCheapModel     = "deepseek/deepseek-v4-flash"
+	legacyDeepSeekBaseURL    = "https://api.deepseek.com/v1"
+	DefaultLLMTimeoutSeconds = 180
+)
+
+// migrateLegacyDeepSeek переносит старую секцию `deepseek:` в `llm:`, если новая
+// не заполнена. Старые конфиги ходили напрямую в api.deepseek.com, поэтому base_url
+// подставляется соответствующий — иначе ключ DeepSeek улетел бы в OpenRouter.
+func migrateLegacyDeepSeek(cfg *Config) {
+	if cfg.DeepSeek == nil {
+		return
+	}
+	if cfg.LLM.APIKey == "" {
+		cfg.LLM = *cfg.DeepSeek
+		if cfg.LLM.BaseURL == "" {
+			cfg.LLM.BaseURL = legacyDeepSeekBaseURL
+		}
+	}
+	cfg.DeepSeek = nil
+}
+
 func setDefaults(cfg *Config) {
-	if cfg.DeepSeek.Model == "" {
-		cfg.DeepSeek.Model = "deepseek-reasoner"
+	if cfg.LLM.BaseURL == "" {
+		cfg.LLM.BaseURL = DefaultLLMBaseURL
 	}
-	if cfg.DeepSeek.TimeoutSeconds == 0 {
-		cfg.DeepSeek.TimeoutSeconds = 180
+	if cfg.LLM.Model == "" {
+		cfg.LLM.Model = DefaultLLMModel
 	}
-	if cfg.DeepSeek.PromptMaxChars == 0 {
-		cfg.DeepSeek.PromptMaxChars = 24000
+	if cfg.LLM.TimeoutSeconds == 0 {
+		cfg.LLM.TimeoutSeconds = DefaultLLMTimeoutSeconds
 	}
-	if cfg.DeepSeek.MaxTickerBriefChars == 0 {
-		cfg.DeepSeek.MaxTickerBriefChars = 900
+	if cfg.LLM.PromptMaxChars == 0 {
+		cfg.LLM.PromptMaxChars = 24000
 	}
-	if cfg.DeepSeek.MaxTickerNewsItems == 0 {
-		cfg.DeepSeek.MaxTickerNewsItems = 8
+	if cfg.LLM.MaxTickerBriefChars == 0 {
+		cfg.LLM.MaxTickerBriefChars = 900
 	}
-	if cfg.DeepSeek.MaxWorldNewsItems == 0 {
-		cfg.DeepSeek.MaxWorldNewsItems = 5
+	if cfg.LLM.MaxTickerNewsItems == 0 {
+		cfg.LLM.MaxTickerNewsItems = 8
 	}
-	if cfg.DeepSeek.MaxNewsTitleChars == 0 {
-		cfg.DeepSeek.MaxNewsTitleChars = 120
+	if cfg.LLM.MaxWorldNewsItems == 0 {
+		cfg.LLM.MaxWorldNewsItems = 5
+	}
+	if cfg.LLM.MaxNewsTitleChars == 0 {
+		cfg.LLM.MaxNewsTitleChars = 120
 	}
 	if cfg.Trading.Interval == "" {
 		cfg.Trading.Interval = "15m"
@@ -319,7 +369,7 @@ func setDefaults(cfg *Config) {
 		cfg.OrderBook.Concurrency = 5
 	}
 	if cfg.Sentiment.Model == "" {
-		cfg.Sentiment.Model = "deepseek-chat"
+		cfg.Sentiment.Model = DefaultLLMCheapModel
 	}
 	if cfg.Sentiment.MaxItemsPerTicker == 0 {
 		cfg.Sentiment.MaxItemsPerTicker = 5
@@ -342,8 +392,16 @@ func (c *Config) Validate() error {
 	if c.Tinkoff.Token == "" {
 		return fmt.Errorf("tinkoff.token is required")
 	}
-	if c.DeepSeek.APIKey == "" {
-		return fmt.Errorf("deepseek.api_key is required")
+	if c.LLM.APIKey == "" {
+		return fmt.Errorf("llm.api_key is required")
+	}
+	if c.LLM.Model == "" {
+		return fmt.Errorf("llm.model is required")
+	}
+	switch c.LLM.ReasoningEffort {
+	case "", "low", "medium", "high":
+	default:
+		return fmt.Errorf("invalid llm.reasoning_effort %q: expected low, medium or high", c.LLM.ReasoningEffort)
 	}
 	if _, err := time.ParseDuration(c.Trading.Interval); err != nil {
 		return fmt.Errorf("invalid trading.interval %q: %w", c.Trading.Interval, err)
@@ -359,7 +417,16 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("telegram.chat_id is required when telegram is enabled")
 		}
 	}
+	// Half-configured basic auth would silently leave the dashboard open.
+	if (c.Web.AuthUser == "") != (c.Web.AuthPassword == "") {
+		return fmt.Errorf("web.auth_user and web.auth_password must be set together")
+	}
 	return nil
+}
+
+// WebAuthEnabled reports whether the dashboard requires basic auth.
+func (c *Config) WebAuthEnabled() bool {
+	return c.Web.AuthUser != "" && c.Web.AuthPassword != ""
 }
 
 func (c *Config) IsSandbox() bool {
@@ -389,6 +456,6 @@ func (c *Config) StopWatchdogInterval() time.Duration {
 	return d
 }
 
-func (c *Config) DeepSeekTimeout() time.Duration {
-	return time.Duration(c.DeepSeek.TimeoutSeconds) * time.Second
+func (c *Config) LLMTimeout() time.Duration {
+	return time.Duration(c.LLM.TimeoutSeconds) * time.Second
 }

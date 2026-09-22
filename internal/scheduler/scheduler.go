@@ -22,7 +22,7 @@ import (
 type Scheduler struct {
 	broker      *broker.BrokerClient
 	moex        *moex.Client
-	ai          *ai.DeepSeekClient
+	ai          *ai.Client
 	executor    *executor.Executor
 	repo        *storage.Repository
 	notifier    *telegram.Notifier
@@ -43,7 +43,7 @@ type Scheduler struct {
 func NewScheduler(
 	bc *broker.BrokerClient,
 	moexClient *moex.Client,
-	aiClient *ai.DeepSeekClient,
+	aiClient *ai.Client,
 	exec *executor.Executor,
 	repo *storage.Repository,
 	notifier *telegram.Notifier,

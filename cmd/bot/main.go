@@ -68,7 +68,7 @@ func main() {
 	log.Info("broker connected", "account_id", bc.AccountID())
 
 	// Init services
-	aiClient := ai.NewDeepSeekClient(cfg, log)
+	aiClient := ai.NewClient(cfg, log)
 	notifier := telegram.NewNotifier(cfg, log)
 	exec := executor.NewExecutor(bc, repo, notifier, cfg, log)
 	moexClient := moex.NewClient(log)

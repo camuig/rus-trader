@@ -12,7 +12,7 @@ var (
 	codeFenceRegex = regexp.MustCompile("(?si)```\\w*\\s*\n(.*?)\n\\s*```")
 )
 
-// StripThinkTags removes DeepSeek R1 reasoning tags from the response.
+// StripThinkTags removes <think> reasoning tags that some providers inline into the response.
 func StripThinkTags(text string) string {
 	return strings.TrimSpace(thinkTagRegex.ReplaceAllString(text, ""))
 }

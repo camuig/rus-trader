@@ -9,14 +9,26 @@ tinkoff:
   sandbox: true
   # Account ID (leave empty in sandbox — will be auto-created)
   account_id: ""
+  # Path to a PEM file with the root CA certificate (corporate CA / MITM proxy).
+  # Preferred fix for "x509: certificate signed by unknown authority".
+  tls_ca_cert_file: ""
+  # Disable TLS certificate verification entirely. INSECURE — traffic (including
+  # the API token) becomes vulnerable to MITM. Use only as a temporary workaround.
+  insecure_skip_verify: false
 
-# DeepSeek AI settings
-deepseek:
-  # API key from https://platform.deepseek.com/
-  api_key: "your-deepseek-api-key-here"
-  # Model name (deepseek-reasoner = R1 with reasoning)
-  model: "deepseek-reasoner"
-  # Request timeout in seconds (R1 reasoning takes 30-90s)
+# LLM provider settings (OpenAI-compatible API, OpenRouter by default)
+llm:
+  # API key from https://openrouter.ai/keys
+  api_key: "sk-or-your-openrouter-key"
+  # OpenAI-compatible endpoint. Change only for another provider
+  # (e.g. https://api.deepseek.com/v1 for direct DeepSeek access).
+  base_url: "https://openrouter.ai/api/v1"
+  # Main model for Screening Agent + Position Manager (OpenRouter model id).
+  # Alternatives: deepseek/deepseek-v4-flash (much cheaper), qwen/qwen3.7-plus, google/gemini-2.5-flash
+  model: "deepseek/deepseek-v4-pro"
+  # Reasoning depth for models that support it: low / medium / high (empty = provider default)
+  reasoning_effort: "medium"
+  # Request timeout in seconds (reasoning models take 30-90s)
   timeout_seconds: 120
   # Hard limit for full user prompt size (characters)
   prompt_max_chars: 24000
@@ -116,6 +128,11 @@ telegram:
 web:
   # Port for the dashboard
   port: 8080
+  # Basic auth for the dashboard. Both must be set together, or startup fails.
+  # Leave empty only when the port is bound to loopback — the dashboard exposes
+  # the full portfolio and trade history.
+  auth_user: ""
+  auth_password: ""
 
 # Logging
 logging:
@@ -135,7 +152,7 @@ journal:
   max_lesson_age_days: 7
   min_trades_for_review: 1
 
-# AI agent-specific settings (override deepseek.* per agent)
+# AI agent-specific settings (override llm.* per agent)
 ai_agents:
   screening:
     max_chars: 16000
@@ -157,7 +174,8 @@ orderbook:
 # Sentiment scoring (news + SmartLab forum → LLM)
 sentiment:
   enabled: true
-  model: "deepseek-chat"
+  # Cheap model is enough for sentiment scoring
+  model: "deepseek/deepseek-v4-flash"
   max_items_per_ticker: 5
   forum_enabled: true
   max_forum_posts: 5
